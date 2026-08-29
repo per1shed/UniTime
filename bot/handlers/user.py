@@ -162,13 +162,7 @@ async def _send_with_keyboard(message: Message, text: str, reply_markup) -> None
 
 
 async def _load_universities(session: AsyncSession) -> list[University]:
-    stmt = (
-        select(University)
-        .join(Specialty, Specialty.university_id == University.id)
-        .join(ScheduleSource, ScheduleSource.specialty_id == Specialty.id)
-        .distinct()
-        .order_by(University.name)
-    )
+    stmt = select(University).order_by(University.name)
     result = await session.execute(stmt)
     return list(result.scalars().all())
 

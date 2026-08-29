@@ -42,12 +42,19 @@ class ScheduleSyncService:
     async def sync_all(self) -> None:
         async with self.session_factory() as session:
             universities = await ensure_universities(session)
-            for university in universities:
-                if university.code == "rzgmu":
-                    await self._sync_rzgmu(session, university)
-                elif university.code == "rsreu":
-                    await self._sync_rsreu(session, university)
             await session.commit()
+
+        for university in universities:
+            async with self.session_factory() as session:
+                if university.code == "rzgmu":
+                    uni = await session.get(University, university.id)
+                    if uni:
+                        await self._sync_rzgmu(session, uni)
+                elif university.code == "rsreu":
+                    uni = await session.get(University, university.id)
+                    if uni:
+                        await self._sync_rsreu(session, uni)
+                await session.commit()
 
     async def _sync_rzgmu(self, session: AsyncSession, university: University) -> None:
         specialties = await self.rzgmu_html_parser.fetch_specialties(university.schedule_page_path)
@@ -83,6 +90,7 @@ class ScheduleSyncService:
                         link.pdf_path,
                         specialty_info.name,
                     )
+                await session.commit()
 
     async def _sync_rsreu(self, session: AsyncSession, university: University) -> None:
         await dedupe_schedule_sources(session, university.id)
