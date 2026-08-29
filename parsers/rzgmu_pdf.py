@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 import httpx
 import pdfplumber
 
+from parsers.rzgmu_http import create_rzgmu_client, fetch_response
+
 DAY_PATTERNS = {
     "понедельник": 0,
     "вторник": 1,
@@ -844,19 +846,23 @@ class RzgmuPdfParser:
     def __init__(self, base_url: str = "https://www.rzgmu.ru") -> None:
         self.base_url = base_url.rstrip("/")
 
-    async def fetch_and_parse(self, pdf_path: str) -> dict[int, dict[str, list[dict]]]:
+    async def fetch_bytes(
+        self,
+        pdf_path: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> bytes:
         url = f"{self.base_url}{pdf_path}"
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                    response = await client.get(url)
-                    response.raise_for_status()
-                    return parse_pdf_bytes(response.content)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(2 * (attempt + 1))
-        if last_error:
-            raise last_error
-        return {}
+        if client is None:
+            async with create_rzgmu_client() as owned_client:
+                response = await fetch_response(owned_client, url)
+                return response.content
+        response = await fetch_response(client, url)
+        return response.content
+
+    async def fetch_and_parse(
+        self,
+        pdf_path: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> dict[int, dict[str, list[dict]]]:
+        content = await self.fetch_bytes(pdf_path, client=client)
+        return await asyncio.to_thread(parse_pdf_bytes, content)

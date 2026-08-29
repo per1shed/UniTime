@@ -18,6 +18,7 @@ class Settings:
     lesson_reminder_minutes: int
     break_reminder_minutes: int
     schedule_sync_hours: int
+    rzgmu_sync_concurrency: int
 
 
 def get_settings() -> Settings:
@@ -45,4 +46,5 @@ def get_settings() -> Settings:
         lesson_reminder_minutes=int(os.getenv("LESSON_REMINDER_MINUTES", "30")),
         break_reminder_minutes=int(os.getenv("BREAK_REMINDER_MINUTES", "5")),
         schedule_sync_hours=int(os.getenv("SCHEDULE_SYNC_HOURS", "12")),
+        rzgmu_sync_concurrency=int(os.getenv("RZGMU_SYNC_CONCURRENCY", "6")),
     )

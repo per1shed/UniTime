@@ -4,6 +4,8 @@ import re
 import httpx
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from parsers.rzgmu_http import create_rzgmu_client, fetch_response
+
 
 @dataclass
 class ScheduleLink:
@@ -27,11 +29,18 @@ class RzgmuHtmlParser:
     def __init__(self, base_url: str = "https://www.rzgmu.ru") -> None:
         self.base_url = base_url.rstrip("/")
 
-    async def fetch_specialties(self, schedule_path: str) -> list[SpecialtyInfo]:
+    async def fetch_specialties(
+        self,
+        schedule_path: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[SpecialtyInfo]:
         url = f"{self.base_url}{schedule_path}"
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        if client is None:
+            async with create_rzgmu_client() as owned_client:
+                response = await fetch_response(owned_client, url)
+                html = response.text
+        else:
+            response = await fetch_response(client, url)
             html = response.text
 
         soup = BeautifulSoup(html, "lxml")
