@@ -1,0 +1,1364 @@
+import logging
+
+from aiogram import F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import selectinload
+
+from bot import emoji as e
+from bot.config import get_settings
+from bot.messages import entry_text, loading_text, main_menu_text, schedule_choice_text, step_text, user_nick
+from bot.db.models import ScheduleSource, Specialty, University, User
+from bot.db.repository import (
+    format_day_schedule_message,
+    format_schedule_header,
+    format_week_schedule_message,
+    get_available_groups,
+    get_group_schedule,
+    get_or_create_user,
+    get_university_by_id,
+    get_user_subscription,
+    is_portal_source,
+    is_rsreu_source,
+    is_rzgmu_source,
+    lessons_from_day_data,
+    parse_rsreu_ref,
+    resolve_schedule_for_view,
+    schedule_has_week_types,
+    set_user_subscription,
+)
+from bot.utils.course import effective_course_number
+from bot.keyboards.inline import (
+    courses_keyboard,
+    day_selector_keyboard,
+    schedule_nav_keyboard,
+    faculties_for_course_keyboard,
+    groups_keyboard,
+    main_menu_keyboard,
+    notifications_keyboard,
+    rsreu_groups_keyboard,
+    specialties_keyboard,
+    university_courses_keyboard,
+    universities_keyboard,
+    variants_keyboard,
+)
+from parsers.rsreu_faculties import RSREU_FACULTIES
+from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
+from bot.services.keyboard_tracker import get_keyboard_tracker
+from bot.services.sync import ScheduleSyncService
+from bot.states.flow import FlowStorage
+
+logger = logging.getLogger(__name__)
+
+router = Router()
+
+
+def _nick(user) -> str | None:
+    return user_nick(user.first_name, user.username)
+
+
+def _schedule_header(
+    source: ScheduleSource,
+    group_number: int,
+    schedule: dict | None = None,
+) -> str:
+    week_label = None
+    if schedule:
+        week_label = schedule.get("__week__", {}).get("type_label") or None
+    return format_schedule_header(source, group_number, week_type_label=week_label)
+
+
+async def _load_view_schedule(
+    session: AsyncSession,
+    sync_service: ScheduleSyncService,
+    source: ScheduleSource,
+    source_id: int,
+    group_number: int,
+    *,
+    rsreu_week_type: str | None = None,
+) -> dict | None:
+    if is_rsreu_source(source.pdf_path):
+        schedule = await sync_service.load_rsreu_schedule(
+            session,
+            source_id,
+            group_number,
+            week_type=rsreu_week_type,
+        )
+    else:
+        schedule = await get_group_schedule(session, source_id, group_number)
+    if not schedule:
+        return None
+    return resolve_schedule_for_view(
+        schedule,
+        source.pdf_path,
+        week_type=rsreu_week_type,
+    )
+
+
+def _week_type(schedule: dict | None) -> str | None:
+    if not schedule:
+        return None
+    return schedule.get("__week__", {}).get("type")
+
+
+def _show_week_switch(source: ScheduleSource, schedule: dict | None) -> bool:
+    if is_rsreu_source(source.pdf_path):
+        return True
+    return is_rzgmu_source(source.pdf_path) and schedule_has_week_types(schedule)
+
+
+def _schedule_nav_for(
+    source: ScheduleSource,
+    source_id: int,
+    group_number: int,
+    schedule: dict | None = None,
+    *,
+    specialty_id: int | None = None,
+    selected_day: int | None = None,
+    selected_week: bool = False,
+    include_back: bool = False,
+):
+    rsreu = is_rsreu_source(source.pdf_path)
+    return schedule_nav_keyboard(
+        source_id,
+        group_number,
+        selected_day=selected_day,
+        selected_week=selected_week,
+        include_back=include_back,
+        back_callback=f"back:groups:{source_id}:{specialty_id}" if specialty_id else None,
+        show_rsreu_week_switch=_show_week_switch(source, schedule),
+        rsreu_week_type=_week_type(schedule),
+    )
+
+
+async def _load_schedule_source(session: AsyncSession, source_id: int) -> ScheduleSource | None:
+    stmt = (
+        select(ScheduleSource)
+        .options(selectinload(ScheduleSource.specialty).selectinload(Specialty.university))
+        .where(ScheduleSource.id == source_id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _edit_or_answer(callback: CallbackQuery, text: str, reply_markup) -> None:
+    tracker = get_keyboard_tracker()
+    if callback.message:
+        chat_id = callback.message.chat.id
+        message_id = callback.message.message_id
+        await tracker.clear_old(callback.bot, chat_id, except_message_id=message_id)
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+        tracker.register(chat_id, message_id)
+    else:
+        await callback.answer(text, show_alert=True)
+
+
+async def _send_with_keyboard(message: Message, text: str, reply_markup) -> None:
+    tracker = get_keyboard_tracker()
+    await tracker.clear_old(message.bot, message.chat.id)
+    sent = await message.answer(text, reply_markup=reply_markup)
+    tracker.register(message.chat.id, sent.message_id)
+
+
+async def _load_universities(session: AsyncSession) -> list[University]:
+    stmt = (
+        select(University)
+        .join(Specialty, Specialty.university_id == University.id)
+        .join(ScheduleSource, ScheduleSource.specialty_id == Specialty.id)
+        .distinct()
+        .order_by(University.name)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def _load_faculty_specialties(
+    session: AsyncSession, university_id: int, faculty_key: str
+) -> list[Specialty]:
+    faculty = next((item for item in RZGMU_FACULTIES if item.key == faculty_key), None)
+    if not faculty:
+        return []
+    stmt = (
+        select(Specialty)
+        .where(
+            Specialty.university_id == university_id,
+            Specialty.code.in_(faculty.specialty_codes),
+        )
+        .order_by(Specialty.name)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+def _filter_sources_by_course(
+    sources: list[ScheduleSource], course_number: int, university_code: str
+) -> list[ScheduleSource]:
+    return [
+        source
+        for source in sources
+        if effective_course_number(
+            source.course_number, source.variant_name, university_code
+        )
+        == course_number
+    ]
+
+
+def _pick_schedule_source(sources: list[ScheduleSource]) -> ScheduleSource:
+    for source in sources:
+        name = source.variant_name.lower()
+        if "занят" in name and "лек" not in name:
+            return source
+    for source in sources:
+        if "занят" in source.variant_name.lower():
+            return source
+    return sources[0]
+
+
+async def _load_university_courses(
+    session: AsyncSession, university_id: int, university_code: str
+) -> list[int]:
+    stmt = (
+        select(ScheduleSource.course_number, ScheduleSource.variant_name)
+        .join(Specialty)
+        .where(Specialty.university_id == university_id)
+    )
+    courses: set[int] = set()
+    for course_number, variant_name in (await session.execute(stmt)).all():
+        effective = effective_course_number(
+            course_number, variant_name, university_code
+        )
+        if effective:
+            courses.add(effective)
+    return sorted(courses)
+
+
+async def _load_faculties_for_course(
+    session: AsyncSession,
+    university_id: int,
+    university_code: str,
+    course_number: int,
+) -> list:
+    if university_code == "rsreu":
+        faculties = RSREU_FACULTIES
+    else:
+        faculties = RZGMU_FACULTIES
+
+    available = []
+    for faculty in faculties:
+        if university_code == "rsreu":
+            stmt = select(Specialty.id).where(
+                Specialty.university_id == university_id,
+                Specialty.code == faculty.key,
+            )
+        else:
+            stmt = select(Specialty.id).where(
+                Specialty.university_id == university_id,
+                Specialty.code.in_(faculty.specialty_codes),
+            )
+        specialty_ids = list((await session.execute(stmt)).scalars().all())
+        if not specialty_ids:
+            continue
+
+        source_stmt = select(ScheduleSource).where(
+            ScheduleSource.specialty_id.in_(specialty_ids)
+        )
+        sources = list((await session.execute(source_stmt)).scalars().all())
+        if _filter_sources_by_course(sources, course_number, university_code):
+            available.append(faculty)
+    return available
+
+
+async def _show_courses_for_university(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    university_id: int,
+) -> None:
+    async with session_factory() as session:
+        university = await get_university_by_id(session, university_id)
+        code = university.code if university else "rzgmu"
+        course_numbers = await _load_university_courses(session, university_id, code)
+
+    if not course_numbers:
+        await callback.answer("Курсы не найдены. Идёт синхронизация...", show_alert=True)
+        return
+
+    context = f"<b>{university.name}</b>" if university else None
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите курс", context),
+        university_courses_keyboard(university_id, course_numbers),
+    )
+
+
+async def _show_faculties_for_course(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    university_id: int,
+    course_number: int,
+) -> None:
+    async with session_factory() as session:
+        university = await get_university_by_id(session, university_id)
+        code = university.code if university else "rzgmu"
+        faculties = await _load_faculties_for_course(
+            session, university_id, code, course_number
+        )
+
+    if not faculties:
+        await callback.answer("Факультеты для этого курса не найдены.", show_alert=True)
+        return
+
+    context = f"<b>{course_number} курс</b>"
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите факультет", context),
+        faculties_for_course_keyboard(university_id, course_number, faculties),
+    )
+
+
+async def _show_rzgmu_groups_for_faculty_course(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+    university_id: int,
+    faculty_key: str,
+    course_number: int,
+) -> None:
+    async with session_factory() as session:
+        specialties = await _load_faculty_specialties(session, university_id, faculty_key)
+        if not specialties:
+            await callback.answer("Направления не найдены.", show_alert=True)
+            return
+
+        specialty_ids = [item.id for item in specialties]
+        stmt = select(ScheduleSource).where(ScheduleSource.specialty_id.in_(specialty_ids))
+        sources = _filter_sources_by_course(
+            list((await session.execute(stmt)).scalars().all()),
+            course_number,
+            "rzgmu",
+        )
+
+    if not sources:
+        await callback.answer("Группы для этого курса не найдены.", show_alert=True)
+        return
+
+    source = _pick_schedule_source(sources)
+    back_callback = f"back:fac:{university_id}:{course_number}"
+    await _show_groups(
+        callback,
+        session_factory,
+        sync_service,
+        source.id,
+        source.specialty_id,
+        back_callback=back_callback,
+    )
+
+
+async def _show_portal_groups_for_course(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    university_id: int,
+    specialty_id: int,
+    course_number: int,
+    page: int = 0,
+    back_callback: str | None = None,
+    title: str | None = None,
+) -> None:
+    async with session_factory() as session:
+        specialty = await session.get(Specialty, specialty_id)
+        university = (
+            await get_university_by_id(session, specialty.university_id)
+            if specialty
+            else None
+        )
+        stmt = (
+            select(ScheduleSource)
+            .where(ScheduleSource.specialty_id == specialty_id)
+            .order_by(ScheduleSource.variant_name)
+        )
+        uni_code = university.code if university else "rsreu"
+        sources = _filter_sources_by_course(
+            list((await session.execute(stmt)).scalars().all()),
+            course_number,
+            uni_code,
+        )
+
+    if not sources:
+        await callback.answer("Группы не найдены. Идёт синхронизация...", show_alert=True)
+        return
+
+    display_title = title or (specialty.name if specialty else None)
+    context_parts = [f"<b>{course_number} курс</b>"]
+    if display_title and display_title != "Группы":
+        context_parts.append(f"<b>{display_title}</b>")
+    context = "\n".join(context_parts)
+
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите группу", context),
+        rsreu_groups_keyboard(
+            university_id,
+            specialty_id,
+            sources,
+            page=page,
+            back_callback=back_callback or f"back:fac:{university_id}:{course_number}",
+        ),
+    )
+
+
+async def _portal_back_callback(
+    session: AsyncSession,
+    university_id: int,
+) -> str:
+    return f"back:fac:{university_id}"
+
+
+async def _show_portal_groups(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    university_id: int,
+    specialty_id: int,
+    page: int = 0,
+    back_callback: str | None = None,
+    title: str | None = None,
+) -> None:
+    async with session_factory() as session:
+        stmt = (
+            select(ScheduleSource)
+            .where(ScheduleSource.specialty_id == specialty_id)
+            .order_by(ScheduleSource.variant_name)
+        )
+        sources = list((await session.execute(stmt)).scalars().all())
+        specialty = await session.get(Specialty, specialty_id)
+        if back_callback is None:
+            back_callback = await _portal_back_callback(session, university_id)
+
+    if not sources:
+        await callback.answer("Группы не найдены. Идёт синхронизация...", show_alert=True)
+        return
+
+    display_title = title or (specialty.name if specialty else None)
+    context = f"<b>{display_title}</b>" if display_title and display_title != "Группы" else None
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите группу", context),
+        rsreu_groups_keyboard(
+            university_id,
+            specialty_id,
+            sources,
+            page=page,
+            back_callback=back_callback,
+        ),
+    )
+
+
+async def _show_specialties(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    university_id: int,
+    faculty_key: str,
+) -> None:
+    async with session_factory() as session:
+        specialties = await _load_faculty_specialties(session, university_id, faculty_key)
+    if not specialties:
+        await callback.answer("Направления не найдены.", show_alert=True)
+        return
+    faculty = next(item for item in RZGMU_FACULTIES if item.key == faculty_key)
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите направление", f"<b>{faculty.name}</b>"),
+        specialties_keyboard(specialties, university_id, faculty_key),
+    )
+
+
+async def _build_entry(
+    session: AsyncSession,
+    has_subscription: bool,
+    nick: str | None,
+    *,
+    pick_university: bool = False,
+) -> tuple[str, object]:
+    if has_subscription and not pick_university:
+        return main_menu_text(nick), main_menu_keyboard()
+
+    universities = await _load_universities(session)
+
+    if not universities:
+        if has_subscription:
+            return loading_text(nick), main_menu_keyboard()
+        return loading_text(nick), universities_keyboard([])
+
+    return entry_text(nick), universities_keyboard(universities)
+
+
+async def _send_entry(
+    message: Message,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage | None = None,
+    *,
+    reset_flow: bool = False,
+    ensure_user: bool = False,
+    pick_university: bool = False,
+) -> None:
+    if reset_flow and flow_storage is not None:
+        flow_storage.reset(message.from_user.id)
+
+    async with session_factory() as session:
+        if ensure_user:
+            await get_or_create_user(
+                session,
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.first_name,
+            )
+        sub = await get_user_subscription(session, message.from_user.id)
+        text, keyboard = await _build_entry(
+            session,
+            sub is not None,
+            _nick(message.from_user),
+            pick_university=pick_university,
+        )
+        if ensure_user:
+            await session.commit()
+
+    await _send_with_keyboard(message, text, keyboard)
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    await _send_entry(message, session_factory, ensure_user=True)
+
+
+@router.message(Command("change"))
+async def cmd_change(
+    message: Message,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    await _send_entry(message, session_factory, flow_storage, reset_flow=True, pick_university=True)
+
+
+async def _discard_user_message(message: Message) -> None:
+    try:
+        await message.delete()
+    except Exception:
+        logger.debug("Could not delete user message in chat %s", message.chat.id, exc_info=True)
+
+
+@router.message(
+    (F.text & ~F.text.startswith("/"))
+    | F.photo
+    | F.sticker
+    | F.voice
+    | F.video
+    | F.document
+    | F.audio
+    | F.video_note
+    | F.animation
+    | F.contact
+    | F.location
+)
+async def on_user_message(message: Message) -> None:
+    await _discard_user_message(message)
+
+
+@router.callback_query(F.data == "menu:main")
+async def on_main_menu(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    flow_storage.reset(callback.from_user.id)
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        text, keyboard = await _build_entry(session, sub is not None, _nick(callback.from_user))
+    await _edit_or_answer(callback, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("uni:"))
+async def on_university_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    university_id = int(callback.data.split(":")[1])
+    flow_storage.get(callback.from_user.id).university_id = university_id
+    await _show_courses_for_university(callback, session_factory, university_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ucrs:"))
+async def on_university_course_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    _, university_id_str, course_str = callback.data.split(":")
+    university_id = int(university_id_str)
+    course_number = int(course_str)
+    state = flow_storage.get(callback.from_user.id)
+    state.university_id = university_id
+    state.course_number = course_number
+
+    await _show_faculties_for_course(callback, session_factory, university_id, course_number)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("fac:"))
+async def on_faculty_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+    sync_service: ScheduleSyncService,
+) -> None:
+    _, university_id_str, faculty_key, course_str = callback.data.split(":")
+    university_id = int(university_id_str)
+    course_number = int(course_str)
+    state = flow_storage.get(callback.from_user.id)
+    state.university_id = university_id
+    state.faculty_key = faculty_key
+    state.course_number = course_number
+
+    async with session_factory() as session:
+        university = await get_university_by_id(session, university_id)
+
+    if university and university.code == "rsreu":
+        async with session_factory() as session:
+            stmt = select(Specialty).where(
+                Specialty.university_id == university_id,
+                Specialty.code == faculty_key,
+            )
+            specialty = (await session.execute(stmt)).scalar_one_or_none()
+        if not specialty:
+            await callback.answer("Факультет не найден.", show_alert=True)
+            return
+        state.specialty_id = specialty.id
+        await _show_portal_groups_for_course(
+            callback,
+            session_factory,
+            university_id,
+            specialty.id,
+            course_number,
+        )
+        await callback.answer()
+        return
+
+    await _show_rzgmu_groups_for_faculty_course(
+        callback,
+        session_factory,
+        sync_service,
+        university_id,
+        faculty_key,
+        course_number,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:ucrs:"))
+async def on_back_to_university_courses(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    university_id = int(callback.data.split(":")[2])
+    flow_storage.get(callback.from_user.id).university_id = university_id
+    await _show_courses_for_university(callback, session_factory, university_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:fac:"))
+async def on_back_to_faculties(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    parts = callback.data.split(":")
+    university_id = int(parts[2])
+    course_number = int(parts[3])
+    state = flow_storage.get(callback.from_user.id)
+    state.university_id = university_id
+    state.course_number = course_number
+    await _show_faculties_for_course(callback, session_factory, university_id, course_number)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:uni:"))
+async def on_back_to_universities(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        text, keyboard = await _build_entry(
+            session,
+            sub is not None,
+            _nick(callback.from_user),
+            pick_university=True,
+        )
+    await _edit_or_answer(callback, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("spec:"))
+async def on_specialty_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    specialty_id = int(callback.data.split(":")[1])
+    flow_storage.get(callback.from_user.id).specialty_id = specialty_id
+
+    async with session_factory() as session:
+        stmt = (
+            select(ScheduleSource.course_number)
+            .where(ScheduleSource.specialty_id == specialty_id)
+            .distinct()
+            .order_by(ScheduleSource.course_number)
+        )
+        result = await session.execute(stmt)
+        course_numbers = list(result.scalars().all())
+
+    if not course_numbers:
+        await callback.answer("Курсы не найдены. Идёт синхронизация...", show_alert=True)
+        return
+
+    await _show_courses_for_specialty(callback, session_factory, specialty_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("course:"))
+async def on_course_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+    sync_service: ScheduleSyncService,
+) -> None:
+    _, specialty_id_str, course_number_str = callback.data.split(":")
+    specialty_id = int(specialty_id_str)
+    course_number = int(course_number_str)
+    flow_storage.get(callback.from_user.id).specialty_id = specialty_id
+
+    async with session_factory() as session:
+        stmt = select(ScheduleSource).where(
+            ScheduleSource.specialty_id == specialty_id,
+            ScheduleSource.course_number == course_number,
+        )
+        result = await session.execute(stmt)
+        sources = list(result.scalars().all())
+
+    if not sources:
+        await callback.answer("Расписание для курса не найдено.", show_alert=True)
+        return
+
+    if len(sources) == 1:
+        await _show_groups(callback, session_factory, sync_service, sources[0].id, specialty_id)
+        await callback.answer()
+        return
+
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите тип расписания"),
+        variants_keyboard(specialty_id, course_number, sources),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:course:"))
+async def on_back_to_courses(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    specialty_id = int(callback.data.split(":")[2])
+    await _show_courses_for_specialty(callback, session_factory, specialty_id)
+    await callback.answer()
+
+
+async def _show_specialties_for_id(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    specialty_id: int,
+) -> None:
+    async with session_factory() as session:
+        specialty = await session.get(Specialty, specialty_id)
+        if not specialty:
+            await callback.answer("Направление не найдено.", show_alert=True)
+            return
+        faculty = faculty_for_code(specialty.code)
+        faculty_key = faculty.key if faculty else RZGMU_FACULTIES[-1].key
+        specialties = await _load_faculty_specialties(
+            session, specialty.university_id, faculty_key
+        )
+
+    if len(specialties) == 1:
+        await _show_courses_for_university(callback, session_factory, specialty.university_id)
+        return
+
+    faculty = next(item for item in RZGMU_FACULTIES if item.key == faculty_key)
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите направление", f"<b>{faculty.name}</b>"),
+        specialties_keyboard(specialties, specialty.university_id, faculty_key),
+    )
+
+
+async def _show_courses_for_specialty(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    specialty_id: int,
+) -> None:
+    async with session_factory() as session:
+        specialty = await session.get(Specialty, specialty_id)
+        stmt = (
+            select(ScheduleSource.course_number)
+            .where(ScheduleSource.specialty_id == specialty_id)
+            .distinct()
+            .order_by(ScheduleSource.course_number)
+        )
+        course_numbers = list((await session.execute(stmt)).scalars().all())
+
+    title = specialty.name if specialty else "Направление"
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите курс", f"<b>{title}</b>"),
+        courses_keyboard(specialty_id, course_numbers),
+    )
+
+
+@router.callback_query(F.data.startswith("back:spec_by_id:"))
+async def on_back_to_specialties_by_id(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    specialty_id = int(callback.data.split(":")[2])
+    await _show_specialties_for_id(callback, session_factory, specialty_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:variant:"))
+async def on_back_to_variant(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    parts = callback.data.split(":")
+    source_id = int(parts[2])
+    specialty_id = int(parts[3]) if len(parts) > 3 else None
+
+    async with session_factory() as session:
+        source = await session.get(ScheduleSource, source_id)
+        if not source:
+            await callback.answer("Источник не найден.", show_alert=True)
+            return
+        specialty_id = specialty_id or source.specialty_id
+        stmt = select(ScheduleSource).where(
+            ScheduleSource.specialty_id == source.specialty_id,
+            ScheduleSource.course_number == source.course_number,
+        )
+        sources = list((await session.execute(stmt)).scalars().all())
+        course_number = source.course_number
+
+    if len(sources) == 1:
+        await _show_courses_for_specialty(callback, session_factory, specialty_id)
+        await callback.answer()
+        return
+
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите тип расписания"),
+        variants_keyboard(specialty_id, course_number, sources),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("back:groups:"))
+async def on_back_to_groups(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+    flow_storage: FlowStorage,
+) -> None:
+    _, source_id_str, specialty_id_str = callback.data.split(":")
+    source_id = int(source_id_str)
+    specialty_id = int(specialty_id_str)
+    state = flow_storage.get(callback.from_user.id)
+
+    async with session_factory() as session:
+        source = await session.get(ScheduleSource, source_id)
+        if source and is_portal_source(source.pdf_path):
+            specialty = await session.get(Specialty, specialty_id)
+            university_id = specialty.university_id if specialty else 0
+            university = await get_university_by_id(session, university_id)
+
+            course_number = state.course_number or effective_course_number(
+                source.course_number,
+                source.variant_name,
+                university.code if university else None,
+            )
+            if course_number:
+                await _show_portal_groups_for_course(
+                    callback,
+                    session_factory,
+                    university_id,
+                    specialty_id,
+                    course_number,
+                    back_callback=f"back:fac:{university_id}:{course_number}",
+                )
+            else:
+                await _show_portal_groups(
+                    callback,
+                    session_factory,
+                    university_id,
+                    specialty_id,
+                )
+            await callback.answer()
+            return
+
+        specialty = await session.get(Specialty, specialty_id)
+        university_id = specialty.university_id if specialty else 0
+
+    back_callback = None
+    if state.course_number and university_id:
+        back_callback = f"back:fac:{university_id}:{state.course_number}"
+
+    await _show_groups(
+        callback,
+        session_factory,
+        sync_service,
+        source_id,
+        specialty_id,
+        back_callback=back_callback,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rgpage:"))
+async def on_rsreu_group_page(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    _, specialty_id_str, page_str = callback.data.split(":")
+    specialty_id = int(specialty_id_str)
+    course_number = flow_storage.get(callback.from_user.id).course_number
+    async with session_factory() as session:
+        specialty = await session.get(Specialty, specialty_id)
+        university_id = specialty.university_id if specialty else 0
+    if course_number:
+        await _show_portal_groups_for_course(
+            callback,
+            session_factory,
+            university_id,
+            specialty_id,
+            course_number,
+            int(page_str),
+        )
+    else:
+        await _show_portal_groups(
+            callback,
+            session_factory,
+            university_id,
+            specialty_id,
+            int(page_str),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rgroup:"))
+async def on_portal_group_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    source_id = int(callback.data.split(":")[1])
+
+    async with session_factory() as session:
+        stmt = (
+            select(ScheduleSource)
+            .options(selectinload(ScheduleSource.specialty).selectinload(Specialty.university))
+            .where(ScheduleSource.id == source_id)
+        )
+        source = (await session.execute(stmt)).scalar_one_or_none()
+        if not source:
+            await callback.answer("Группа не найдена.", show_alert=True)
+            return
+
+        if not is_rsreu_source(source.pdf_path):
+            await callback.answer("Некорректная ссылка на расписание.", show_alert=True)
+            return
+        ref = parse_rsreu_ref(source.pdf_path)
+        if not ref:
+            await callback.answer("Некорректная ссылка на расписание.", show_alert=True)
+            return
+        _, group_id = ref
+
+    await sync_service.ensure_source_cached(source_id)
+
+    async with session_factory() as session:
+        await get_or_create_user(
+            session,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+        )
+        user = (
+            await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+        ).scalar_one()
+        await set_user_subscription(session, user.id, source_id, group_id)
+
+        stmt = (
+            select(ScheduleSource)
+            .options(selectinload(ScheduleSource.specialty).selectinload(Specialty.university))
+            .where(ScheduleSource.id == source_id)
+        )
+        source = (await session.execute(stmt)).scalar_one()
+        schedule = await _load_view_schedule(
+            session, sync_service, source, source_id, group_id
+        )
+        await session.commit()
+
+    if not schedule:
+        await callback.answer("Расписание группы не найдено.", show_alert=True)
+        return
+
+    header = _schedule_header(source, group_id, schedule)
+    context = header
+
+    await _edit_or_answer(
+        callback,
+        schedule_choice_text(context),
+        day_selector_keyboard(
+            source_id,
+            group_id,
+            source.specialty_id,
+            show_rsreu_week_switch=True,
+            rsreu_week_type=_week_type(schedule),
+        ),
+    )
+    await callback.answer("Расписание сохранено")
+
+
+@router.callback_query(F.data.startswith("variant:"))
+async def on_variant_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    source_id = int(callback.data.split(":")[1])
+    async with session_factory() as session:
+        source = await session.get(ScheduleSource, source_id)
+        specialty_id = source.specialty_id if source else 0
+    await _show_groups(callback, session_factory, sync_service, source_id, specialty_id)
+    await callback.answer()
+
+
+async def _show_groups(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+    source_id: int,
+    specialty_id: int,
+    page: int = 0,
+    back_callback: str | None = None,
+) -> None:
+    async with session_factory() as session:
+        groups = await get_available_groups(session, source_id)
+
+    if not groups:
+        await sync_service.ensure_source_cached(source_id)
+        async with session_factory() as session:
+            groups = await get_available_groups(session, source_id)
+
+    if not groups:
+        await callback.answer("Не удалось загрузить группы из PDF.", show_alert=True)
+        return
+
+    await _edit_or_answer(
+        callback,
+        step_text(_nick(callback.from_user), "Выберите номер группы"),
+        groups_keyboard(source_id, groups, specialty_id, page=page, back_callback=back_callback),
+    )
+
+
+@router.callback_query(F.data.startswith("gpage:"))
+async def on_group_page(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    _, source_id_str, page_str = callback.data.split(":")
+    source_id = int(source_id_str)
+    async with session_factory() as session:
+        source = await session.get(ScheduleSource, source_id)
+        specialty_id = source.specialty_id if source else 0
+    await _show_groups(
+        callback, session_factory, sync_service, source_id, specialty_id, int(page_str)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("group:"))
+async def on_group_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, source_id_str, group_number_str = callback.data.split(":")
+    source_id = int(source_id_str)
+    group_number = int(group_number_str)
+
+    async with session_factory() as session:
+        await get_or_create_user(
+            session,
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.first_name,
+        )
+        user = (
+            await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+        ).scalar_one()
+        await set_user_subscription(session, user.id, source_id, group_number)
+
+        stmt = (
+            select(ScheduleSource)
+            .options(selectinload(ScheduleSource.specialty).selectinload(Specialty.university))
+            .where(ScheduleSource.id == source_id)
+        )
+        source = (await session.execute(stmt)).scalar_one()
+        schedule = await get_group_schedule(session, source_id, group_number)
+        await session.commit()
+
+    if not schedule:
+        await callback.answer("Расписание группы не найдено.", show_alert=True)
+        return
+
+    context = (
+        f"<b>{source.specialty.university.name}</b>\n"
+        f"{source.specialty.name} · {source.course_number} курс\n"
+        f"Группа {group_number} · {source.variant_name}"
+    )
+
+    await _edit_or_answer(
+        callback,
+        schedule_choice_text(context),
+        day_selector_keyboard(source_id, group_number, source.specialty_id),
+    )
+    await callback.answer("Расписание сохранено")
+
+
+@router.callback_query(F.data.startswith("day:"))
+async def on_day_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    _, source_id_str, group_number_str, day_str = callback.data.split(":")
+    source_id = int(source_id_str)
+    group_number = int(group_number_str)
+    day_index = int(day_str)
+
+    async with session_factory() as session:
+        source = await _load_schedule_source(session, source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = await _load_view_schedule(
+            session, sync_service, source, source_id, group_number
+        )
+        if not schedule:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+
+    lessons = lessons_from_day_data(schedule.get(str(day_index), []))
+    tz = get_settings().timezone
+    header = _schedule_header(source, group_number, schedule)
+    text = format_day_schedule_message(header, day_index, lessons, tz)
+    await _edit_or_answer(
+        callback,
+        text,
+        _schedule_nav_for(
+            source,
+            source_id,
+            group_number,
+            schedule,
+            selected_day=day_index,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rwk:"))
+async def on_rsreu_week_type_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    parts = callback.data.split(":")
+    source_id = int(parts[1])
+    group_number = int(parts[2])
+    week_type = parts[3]
+    day_index = int(parts[4]) if len(parts) > 4 else None
+
+    if week_type not in {"numerator", "denominator"}:
+        await callback.answer("Некорректный тип недели.", show_alert=True)
+        return
+
+    async with session_factory() as session:
+        source = await _load_schedule_source(session, source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        if not is_rsreu_source(source.pdf_path) and not is_rzgmu_source(source.pdf_path):
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = await _load_view_schedule(
+            session,
+            sync_service,
+            source,
+            source_id,
+            group_number,
+            rsreu_week_type=week_type,
+        )
+        if not schedule:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+
+    tz = get_settings().timezone
+    header = _schedule_header(source, group_number, schedule)
+    if day_index is not None:
+        lessons = lessons_from_day_data(schedule.get(str(day_index), []))
+        text = format_day_schedule_message(header, day_index, lessons, tz)
+        keyboard = _schedule_nav_for(
+            source,
+            source_id,
+            group_number,
+            schedule,
+            selected_day=day_index,
+        )
+    else:
+        text = format_week_schedule_message(header, schedule, tz)
+        keyboard = _schedule_nav_for(
+            source,
+            source_id,
+            group_number,
+            schedule,
+            selected_week=True,
+        )
+
+    await _edit_or_answer(callback, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("week:"))
+async def on_week_selected(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    _, source_id_str, group_number_str = callback.data.split(":")
+    source_id = int(source_id_str)
+    group_number = int(group_number_str)
+
+    async with session_factory() as session:
+        source = await _load_schedule_source(session, source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = await _load_view_schedule(
+            session, sync_service, source, source_id, group_number
+        )
+
+    if not schedule:
+        await callback.answer("Расписание не найдено.", show_alert=True)
+        return
+
+    tz = get_settings().timezone
+    header = _schedule_header(source, group_number, schedule)
+    text = format_week_schedule_message(header, schedule, tz)
+    await _edit_or_answer(
+        callback,
+        text,
+        _schedule_nav_for(
+            source,
+            source_id,
+            group_number,
+            schedule,
+            selected_week=True,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:my")
+async def on_my_schedule(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+) -> None:
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        if not sub:
+            await callback.answer("Сначала выберите расписание.", show_alert=True)
+            return
+
+        source = await _load_schedule_source(session, sub.source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = await _load_view_schedule(
+            session, sync_service, source, sub.source_id, sub.group_number
+        )
+
+    if not schedule:
+        await callback.answer("Расписание не найдено.", show_alert=True)
+        return
+
+    tz = get_settings().timezone
+    header = _schedule_header(source, sub.group_number, schedule)
+    text = format_week_schedule_message(header, schedule, tz)
+    await _edit_or_answer(
+        callback,
+        text,
+        _schedule_nav_for(
+            source,
+            sub.source_id,
+            sub.group_number,
+            schedule,
+            selected_week=True,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:notifications")
+async def on_notifications_menu(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        if not sub:
+            await callback.answer("Сначала выберите расписание.", show_alert=True)
+            return
+        enabled = sub.notifications_enabled
+
+    text = (
+        f"{e.ce(e.BELL, '🔊')} <b>Уведомления</b>\n\n"
+        "• В 6:00 — расписание на сегодня\n"
+        "• В 21:00 — расписание на завтра\n"
+        "• За 30 минут до каждой пары"
+    )
+    await _edit_or_answer(callback, text, notifications_keyboard(enabled))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "notify:toggle")
+async def on_notifications_toggle(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        if not sub:
+            await callback.answer("Сначала выберите расписание.", show_alert=True)
+            return
+        sub.notifications_enabled = not sub.notifications_enabled
+        enabled = sub.notifications_enabled
+        await session.commit()
+
+    await _edit_or_answer(
+        callback,
+        f"{e.ce(e.BELL, '🔊')} Уведомления переключены.",
+        notifications_keyboard(enabled),
+    )
+    await callback.answer()
+

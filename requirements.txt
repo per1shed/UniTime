@@ -1,0 +1,11 @@
+aiogram==3.31.0
+sqlalchemy[asyncio]==2.0.40
+asyncpg==0.30.0
+alembic==1.15.2
+httpx==0.28.1
+beautifulsoup4==4.13.4
+lxml==5.4.0
+pdfplumber==0.11.6
+apscheduler==3.11.0
+python-dotenv==1.1.0
+greenlet==3.2.1
