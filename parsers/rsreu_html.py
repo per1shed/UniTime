@@ -9,6 +9,8 @@ from datetime import date, timedelta
 import httpx
 from bs4 import BeautifulSoup, Tag
 
+from parsers.rsreu_http import create_rsreu_client, fetch_response
+
 LESSON_TYPE_RE = re.compile(
     r"^(Лек\.|Лаб\.|Упр\.|Практ\.|Сем\.|Конс\.|Зач\.|Экз\.|Диф\.зач\.)\s*",
     re.IGNORECASE,
@@ -81,12 +83,19 @@ class RsreuHtmlParser:
     def __init__(self, base_url: str = "https://rasp.rsreu.ru") -> None:
         self.base_url = base_url.rstrip("/")
 
-    async def fetch_groups(self, faculty_id: int) -> list[GroupInfo]:
+    async def fetch_groups(
+        self,
+        faculty_id: int,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[GroupInfo]:
         url = f"{self.base_url}/schedule-frame/group?faculty={faculty_id}"
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            html_text = response.text
+        if client is None:
+            async with create_rsreu_client() as owned_client:
+                response = await fetch_response(owned_client, url)
+        else:
+            response = await fetch_response(client, url)
+        html_text = response.text
 
         match = re.search(r':options="(\[.*?\])"', html_text)
         if not match:
@@ -103,15 +112,23 @@ class RsreuHtmlParser:
         groups.sort(key=lambda g: g.label)
         return groups
 
-    async def fetch_weeks(self, faculty_id: int, group_id: int) -> list[WeekInfo]:
+    async def fetch_weeks(
+        self,
+        faculty_id: int,
+        group_id: int,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[WeekInfo]:
         url = (
             f"{self.base_url}/schedule-frame/group"
             f"?faculty={faculty_id}&group={group_id}"
         )
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "lxml")
+        if client is None:
+            async with create_rsreu_client() as owned_client:
+                response = await fetch_response(owned_client, url)
+        else:
+            response = await fetch_response(client, url)
+        soup = BeautifulSoup(response.text, "lxml")
 
         weeks: list[WeekInfo] = []
         for option in soup.select('select[name="date"] option'):
@@ -128,8 +145,19 @@ class RsreuHtmlParser:
         week_date: str | None = None,
         *,
         today: date | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> dict:
-        weeks = await self.fetch_weeks(faculty_id, group_id)
+        if client is None:
+            async with create_rsreu_client() as owned_client:
+                return await self.fetch_group_schedule(
+                    faculty_id,
+                    group_id,
+                    week_date,
+                    today=today,
+                    client=owned_client,
+                )
+
+        weeks = await self.fetch_weeks(faculty_id, group_id, client=client)
         if not weeks:
             return {}
 
@@ -146,10 +174,8 @@ class RsreuHtmlParser:
             f"{self.base_url}/schedule-frame/group"
             f"?faculty={faculty_id}&group={group_id}&date={selected.date}"
         )
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "lxml")
+        response = await fetch_response(client, url)
+        soup = BeautifulSoup(response.text, "lxml")
 
         schedule = self._parse_schedule_table(soup)
         week_type = parse_week_type(selected.label)

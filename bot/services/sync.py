@@ -23,6 +23,7 @@ from bot.db.repository import (
 from parsers.rsreu_course import course_from_group_label as course_from_rsreu_group_label
 from parsers.rsreu_faculties import RSREU_FACULTIES
 from parsers.rsreu_html import RsreuHtmlParser, pick_current_week, pick_week_by_type
+from parsers.rsreu_http import create_rsreu_client
 from parsers.rzgmu_html import RzgmuHtmlParser, ScheduleLink, SpecialtyInfo
 from parsers.rzgmu_http import create_rzgmu_client
 from parsers.rzgmu_pdf import RzgmuPdfParser
@@ -54,12 +55,28 @@ class ScheduleSyncService:
             universities = await ensure_universities(session)
             await session.commit()
 
-        await asyncio.gather(
-            *[
-                self._sync_university(university.code, university.id)
-                for university in universities
-            ]
-        )
+        rsreu = [university for university in universities if university.code == "rsreu"]
+        others = [university for university in universities if university.code != "rsreu"]
+
+        for university in rsreu:
+            await self._sync_university(university.code, university.id)
+
+        if others:
+            await asyncio.gather(
+                *[
+                    self._sync_university(university.code, university.id)
+                    for university in others
+                ]
+            )
+
+    async def sync_rsreu_only(self) -> None:
+        async with self.session_factory() as session:
+            universities = await ensure_universities(session)
+            await session.commit()
+
+        rsreu = next((university for university in universities if university.code == "rsreu"), None)
+        if rsreu:
+            await self._sync_university("rsreu", rsreu.id)
 
     async def _sync_university(self, code: str, university_id: int) -> None:
         async with self.session_factory() as session:
@@ -140,35 +157,48 @@ class ScheduleSyncService:
             await asyncio.gather(*(process_item(item) for item in work_items))
 
     async def _sync_rsreu(self, session: AsyncSession, university: University) -> None:
+        if self.settings.rsreu_cache_only:
+            logger.info("RSREU sync skipped on server (RSREU_CACHE_ONLY=1)")
+            return
+
         await dedupe_schedule_sources(session, university.id)
 
-        async def sync_faculty(faculty) -> None:
-            async with self.session_factory() as faculty_session:
-                specialty = await upsert_specialty(
-                    faculty_session,
-                    university.id,
-                    faculty.key,
-                    faculty.name,
-                )
-                try:
-                    groups = await self.rsreu_parser.fetch_groups(faculty.site_id)
-                except Exception:
-                    logger.exception("Failed to fetch RSREU groups for %s", faculty.name)
-                    return
+        async with create_rsreu_client(self.settings.rsreu_proxy) as client:
 
-                for group in groups:
-                    course_number = course_from_rsreu_group_label(group.label) or 0
-                    await upsert_schedule_source(
+            async def sync_faculty(faculty) -> None:
+                async with self.session_factory() as faculty_session:
+                    specialty = await upsert_specialty(
                         faculty_session,
-                        specialty.id,
-                        course_number,
-                        group.label,
-                        f"rsreu:{faculty.site_id}:{group.group_id}",
+                        university.id,
+                        faculty.key,
+                        faculty.name,
                     )
-                await faculty_session.commit()
-                logger.info("Synced RSREU %s: %s groups", faculty.name, len(groups))
+                    try:
+                        groups = await self.rsreu_parser.fetch_groups(
+                            faculty.site_id,
+                            client=client,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to fetch RSREU groups for %s", faculty.name
+                        )
+                        return
 
-        await asyncio.gather(*(sync_faculty(faculty) for faculty in RSREU_FACULTIES))
+                    for group in groups:
+                        course_number = course_from_rsreu_group_label(group.label) or 0
+                        await upsert_schedule_source(
+                            faculty_session,
+                            specialty.id,
+                            course_number,
+                            group.label,
+                            f"rsreu:{faculty.site_id}:{group.group_id}",
+                        )
+                    await faculty_session.commit()
+                    logger.info("Synced RSREU %s: %s groups", faculty.name, len(groups))
+
+            await asyncio.gather(
+                *(sync_faculty(faculty) for faculty in RSREU_FACULTIES)
+            )
 
     async def load_rsreu_schedule(
         self,
@@ -188,6 +218,17 @@ class ScheduleSyncService:
 
         faculty_id, group_id = ref
         if group_id != group_number:
+            return None
+
+        cached = await get_group_schedule(session, source_id, group_number)
+        if self.settings.rsreu_cache_only:
+            if cached:
+                return cached
+            logger.warning(
+                "RSREU cache miss for source=%s group=%s (RSREU_CACHE_ONLY=1)",
+                source_id,
+                group_number,
+            )
             return None
 
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
@@ -219,6 +260,9 @@ class ScheduleSyncService:
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
         source = await session.get(ScheduleSource, source_id)
         if not source or not is_rsreu_source(source.pdf_path):
+            return
+
+        if self.settings.rsreu_cache_only:
             return
 
         ref = parse_rsreu_ref(source.pdf_path)
@@ -253,6 +297,8 @@ class ScheduleSyncService:
                 return
 
             if is_rsreu_source(source.pdf_path):
+                if self.settings.rsreu_cache_only:
+                    return
                 ref = parse_rsreu_ref(source.pdf_path)
                 if not ref:
                     return

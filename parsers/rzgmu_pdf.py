@@ -33,10 +33,28 @@ MONTHS = (
 )
 
 TIME_RANGE_RE = re.compile(r"(\d{1,2}\.\d{2})\s*-\s*(\d{1,2}\.\d{2})")
-HOURS_RE = re.compile(r"\(\d+[хx]\d+ч\.?\)", re.IGNORECASE)
+# Семестровая нагрузка вида (17х4ч.) — не показываем в боте.
+HOURS_RE = re.compile(r"\(\d+[хx]\d+ч\.?\)?", re.IGNORECASE)
+# Количество лекций в скобках перед датами: «Физика (4) 2,16/09».
+LECTURE_COUNT_RE = re.compile(r"\(\d+\)")
+LOCATION_START_RE = re.compile(
+    r"(?:^|[\s,;])(?:Медико|спортивный|лекционн|ауд\.|корп\.|ул\.)",
+    re.IGNORECASE,
+)
+LECTURE_DATES_RE = re.compile(
+    r"\d{1,2}[/,][\d/,;\s-]+(?:кр\.\s*\d{1,2}/\d{1,2})?",
+    re.IGNORECASE,
+)
 GROUP_NUM_RE = re.compile(r"^(\d+)\s*гр\.?", re.IGNORECASE)
-STREAM_GROUPS_RE = re.compile(r"(\d+)\s*[-–—]\s*(\d+)\s*гр", re.IGNORECASE)
-GROUPS_RANGE_RE = re.compile(r"(\d+)\s*[-–—]\s*(\d+)\s*гр", re.IGNORECASE)
+# «1-10гр.», «11-22 гр.», «23-32ин.гр.» — потоки лекций.
+STREAM_GROUPS_RE = re.compile(
+    r"(\d+)\s*[-–—]\s*(\d+)\s*(?:ин\.\s*)?гр\.?",
+    re.IGNORECASE,
+)
+GROUPS_RANGE_RE = re.compile(
+    r"(\d+)\s*[-–—]\s*(\d+)\s*(?:ин\.\s*)?гр\.?",
+    re.IGNORECASE,
+)
 DN_RE = re.compile(r"^д\s*/?\s*н$", re.IGNORECASE)
 GROUP_TOKEN_RE = re.compile(r"^(\d+)([a-zа-яё]+)$", re.IGNORECASE)
 PRACTICE_HOURS_RE = re.compile(r"\(\d+\s*дн", re.IGNORECASE)
@@ -184,6 +202,74 @@ def extract_groups_from_header(row: list) -> tuple[int, ...]:
     return ()
 
 
+def strip_semester_hours(text: str) -> str:
+    return HOURS_RE.sub("", text).strip()
+
+
+def _split_location(text: str) -> tuple[str, str]:
+    match = LOCATION_START_RE.search(text)
+    if not match:
+        return text.strip(), ""
+    start = match.start()
+    if text[start] in " ,;":
+        start += 1
+    return text[:start].strip(" ,;"), text[start:].strip(" ,;")
+
+
+def _split_lecture_segment(segment: str) -> tuple[str, str]:
+    cleaned = strip_semester_hours(segment.replace("\n", " "))
+    cleaned = re.sub(r"^Лекции\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = LECTURE_COUNT_RE.sub("", cleaned).strip()
+
+    body, location = _split_location(cleaned)
+    date_match = LECTURE_DATES_RE.search(body)
+    if date_match:
+        dates = date_match.group(0).strip(" ,;")
+        subject = body[: date_match.start()].strip(" ,;")
+        extra_parts = [dates, location]
+    else:
+        subject = body.strip(" ,;")
+        extra_parts = [location]
+
+    subject = re.sub(r"\s+", " ", subject).strip() or "Занятие"
+    extra = " ".join(part for part in extra_parts if part).strip()
+    return subject, extra
+
+
+def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
+    chunk = chunk.replace("\xa0", " ").strip()
+    if not chunk:
+        return []
+
+    raw_lines = [line.strip() for line in chunk.split("\n") if line.strip()]
+    is_lecture_block = any("лекции" in line.lower() for line in raw_lines)
+
+    if is_lecture_block:
+        segments: list[str] = []
+        for line in raw_lines:
+            cleaned = re.sub(r"^Лекции\s+", "", line, flags=re.IGNORECASE).strip()
+            if cleaned:
+                segments.append(cleaned)
+
+        shared_location = ""
+        if segments:
+            _, location = _split_location(segments[-1])
+            shared_location = location
+
+        lessons: list[ParsedLesson] = []
+        for segment in segments:
+            subject, extra = _split_lecture_segment(segment)
+            if shared_location and shared_location not in extra:
+                extra = f"{extra} {shared_location}".strip() if extra else shared_location
+            lessons.append(ParsedLesson(start=start, end=end, subject=subject, extra=extra))
+        return lessons
+
+    flat = re.sub(r"\s*\|\s*", " ", " ".join(raw_lines))
+    flat = re.sub(r"\s+", " ", flat).strip()
+    subject, extra = _split_lecture_segment(flat)
+    return [ParsedLesson(start=start, end=end, subject=subject, extra=extra)]
+
+
 def parse_cell_lessons(cell_text: str) -> list[ParsedLesson]:
     if not cell_text or not cell_text.strip():
         return []
@@ -200,28 +286,7 @@ def parse_cell_lessons(cell_text: str) -> list[ParsedLesson]:
         chunk_start = match.end()
         chunk_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         chunk = text[chunk_start:chunk_end].strip()
-        chunk = re.sub(r"\s+", " ", chunk)
-
-        hours_match = HOURS_RE.search(chunk)
-        if hours_match:
-            subject_part = chunk[: hours_match.start()].strip(" ,;")
-            extra_part = chunk[hours_match.end() :].strip(" ,;")
-        else:
-            subject_part = chunk
-            extra_part = ""
-
-        subject = subject_part.split("\n")[0].strip() or "Занятие"
-        if subject.lower().startswith("лекции "):
-            subject = subject[7:].strip() or "Лекция"
-
-        extra_lines = []
-        if "\n" in subject_part:
-            extra_lines.extend(line.strip() for line in subject_part.split("\n")[1:] if line.strip())
-        if extra_part:
-            extra_lines.append(extra_part)
-        extra = " ".join(extra_lines).strip()
-
-        lessons.append(ParsedLesson(start=start, end=end, subject=subject, extra=extra))
+        lessons.extend(_parse_time_chunk(start, end, chunk))
 
     return lessons
 
@@ -415,6 +480,35 @@ def _parse_practice_table(table: list[list], ctx: ParseContext) -> None:
         )
 
 
+def _row_group_cells(
+    row: list,
+    group_columns: list[tuple[int, int]],
+) -> list[tuple[int, int, str]]:
+    cells: list[tuple[int, int, str]] = []
+    for col_index, group_number in group_columns:
+        if col_index >= len(row):
+            continue
+        cell_text = str(row[col_index] or "").strip()
+        if cell_text:
+            cells.append((col_index, group_number, cell_text))
+    return cells
+
+
+def _is_horizontal_group_row(
+    row: list,
+    group_columns: list[tuple[int, int]],
+) -> tuple[bool, str]:
+    """Горизонтальный блок: одна ячейка на все группы из шапки."""
+    cells = _row_group_cells(row, group_columns)
+    if len(cells) != 1:
+        return False, ""
+    col_index, _, cell_text = cells[0]
+    first_col = min(column for column, _ in group_columns)
+    if col_index != first_col:
+        return False, ""
+    return True, cell_text
+
+
 def _parse_weekly_rows(
     rows: list[list],
     group_columns: list[tuple[int, int]],
@@ -422,6 +516,7 @@ def _parse_weekly_rows(
     ctx: ParseContext,
 ) -> None:
     current_day = ctx.current_day
+    all_groups = tuple(group_number for _, group_number in group_columns)
 
     for row in rows:
         day_index = detect_day_index(row[0] if row else None)
@@ -433,6 +528,18 @@ def _parse_weekly_rows(
             continue
 
         day_key = str(current_day)
+        is_horizontal, horizontal_text = _is_horizontal_group_row(row, group_columns)
+        if is_horizontal:
+            lessons = parse_cell_lessons(horizontal_text)
+            _assign_lessons_to_groups(
+                group_schedules,
+                all_groups,
+                day_key,
+                lessons,
+                week_type=ctx.week_type if ctx.week_type_sections > 0 else None,
+            )
+            continue
+
         for col_index, group_number in group_columns:
             if col_index >= len(row):
                 continue
@@ -573,7 +680,8 @@ def _parse_lecture_row_simple(
         start = normalize_time(time_match.group(1))
         end = normalize_time(time_match.group(2))
         subject = subject_cell.split("\n")[0].strip() or "Лекция"
-        extra = extra_cell.replace("\n", " ").strip()
+        subject = strip_semester_hours(subject)
+        extra = strip_semester_hours(extra_cell.replace("\n", " ").strip())
         lesson = ParsedLesson(start=start, end=end, subject=subject, extra=extra)
         _assign_lessons_to_groups(
             group_schedules, groups, day_key, [lesson], week_type=ctx.week_type
