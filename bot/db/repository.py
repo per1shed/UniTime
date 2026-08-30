@@ -151,19 +151,44 @@ def resolve_schedule_for_view(
     selected_week_start = week_start or monday_of(moment.date())
 
     if is_rzgmu_source(pdf_path):
-        resolved = resolve_rzgmu_schedule(schedule, week_type=week_type, now=now)
+        resolved = resolve_rzgmu_schedule(
+            schedule,
+            week_type=week_type,
+            week_start=selected_week_start,
+            now=now,
+        )
         if schedule_is_calendar_format(resolved):
+            # Still stamp the selected calendar week for the week switcher.
+            from parsers.rzgmu_dates import week_label as _week_label
+
+            resolved = dict(resolved)
+            resolved.setdefault("__week__", {})
+            resolved["__week__"] = {
+                **resolved.get("__week__", {}),
+                "calendar_start": selected_week_start.isoformat(),
+                "calendar_label": _week_label(selected_week_start),
+            }
             return resolved
         return filter_weekly_schedule(resolved, selected_week_start)
 
     if is_rsreu_source(pdf_path):
-        result = dict(schedule)
-        result.setdefault("__week__", {})
-        result["__week__"] = {
-            **result.get("__week__", {}),
-            "calendar_start": selected_week_start.isoformat(),
-            "calendar_label": week_label(selected_week_start),
-        }
+        from parsers.rzgmu_dates import monday_of as _monday_of
+
+        result = {key: value for key, value in schedule.items() if key != "__weeks__"}
+        week_meta = dict(result.get("__week__", {}))
+        cached_week_date = week_meta.get("date")
+        if week_start is not None:
+            label_start = week_start
+        elif cached_week_date:
+            try:
+                label_start = _monday_of(date.fromisoformat(cached_week_date))
+            except ValueError:
+                label_start = selected_week_start
+        else:
+            label_start = selected_week_start
+        week_meta["calendar_start"] = label_start.isoformat()
+        week_meta["calendar_label"] = week_label(label_start)
+        result["__week__"] = week_meta
         return result
 
     return schedule

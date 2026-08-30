@@ -27,6 +27,8 @@ from parsers.rsreu_html import (
     pick_current_week,
     pick_week_by_start,
     pick_week_by_type,
+    schedule_from_weeks_cache,
+    weeks_window,
 )
 from parsers.rsreu_http import create_rsreu_client
 from parsers.rzgmu_html import RzgmuHtmlParser, ScheduleLink, SpecialtyInfo
@@ -213,6 +215,7 @@ class ScheduleSyncService:
         *,
         week_type: str | None = None,
         week_start: date | None = None,
+        cache_weeks: bool = False,
     ) -> dict | None:
         source = await session.get(ScheduleSource, source_id)
         if not source or not is_rsreu_source(source.pdf_path):
@@ -226,10 +229,13 @@ class ScheduleSyncService:
         if group_id != group_number:
             return None
 
+        today = datetime.now(ZoneInfo(self.settings.timezone)).date()
         cached = await get_group_schedule(session, source_id, group_number)
+
         if self.settings.rsreu_cache_only:
-            if cached:
-                return cached
+            selected = schedule_from_weeks_cache(cached, week_start, today=today)
+            if selected:
+                return selected
             logger.warning(
                 "RSREU cache miss for source=%s group=%s (RSREU_CACHE_ONLY=1)",
                 source_id,
@@ -237,8 +243,37 @@ class ScheduleSyncService:
             )
             return None
 
-        today = datetime.now(ZoneInfo(self.settings.timezone)).date()
         weeks = await self.rsreu_parser.fetch_weeks(faculty_id, group_id)
+        if not weeks:
+            return None
+
+        if cache_weeks:
+            window = weeks_window(weeks, today, before=1, after=4)
+            weeks_map: dict[str, dict] = {}
+            for week in window:
+                schedule = await self.rsreu_parser.fetch_group_schedule(
+                    faculty_id,
+                    group_id,
+                    week.date,
+                    today=today,
+                    weeks=weeks,
+                )
+                if schedule:
+                    weeks_map[week.date] = schedule
+
+            if not weeks_map:
+                return None
+
+            payload = schedule_from_weeks_cache(
+                {"__weeks__": weeks_map},
+                week_start,
+                today=today,
+            ) or {}
+            payload["__weeks__"] = weeks_map
+            payload["__meta__"] = {"lesson_types": True}
+            await save_schedule_cache(session, source_id, {group_number: payload})
+            return payload
+
         if week_start:
             selected_week = pick_week_by_start(weeks, week_start)
         elif week_type:
@@ -256,7 +291,16 @@ class ScheduleSyncService:
             weeks=weeks,
         )
         if schedule:
-            await save_schedule_cache(session, source_id, {group_number: schedule})
+            # Preserve previously cached weeks when refreshing a single week.
+            weeks_map = {}
+            if cached and isinstance(cached.get("__weeks__"), dict):
+                weeks_map = dict(cached["__weeks__"])
+            weeks_map[selected_week.date] = schedule
+            payload = dict(schedule)
+            payload["__weeks__"] = weeks_map
+            payload["__meta__"] = {"lesson_types": True}
+            await save_schedule_cache(session, source_id, {group_number: payload})
+            return payload
         return schedule
 
     async def ensure_rsreu_schedule_current(
@@ -319,6 +363,7 @@ class ScheduleSyncService:
                     today=today,
                 )
                 if schedule:
+                    schedule["__meta__"] = {"lesson_types": True}
                     await save_schedule_cache(session, source.id, {group_id: schedule})
             else:
                 group_schedules = await self.rzgmu_pdf_parser.fetch_and_parse(source.pdf_path)

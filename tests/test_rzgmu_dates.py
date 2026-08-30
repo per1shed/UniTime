@@ -26,26 +26,26 @@ def test_parse_multiple_date_groups():
 
 
 def test_lesson_visible_by_week_dates():
-    ref = date(2025, 9, 1)
     anatomy = {"subject": "Анатомия", "extra": "15,29/09"}
     military = {"subject": "Основы военной подготовки", "extra": "8,22/09"}
 
-    week_sep_15 = date(2025, 9, 15)
+    # 2026-09-14 is Monday; 15.09 and 08.09 are Tuesdays.
+    week_sep_15 = date(2026, 9, 14)
     assert lesson_visible_on_week(anatomy, 1, week_sep_15) is True
     assert lesson_visible_on_week(military, 1, week_sep_15) is False
 
-    week_sep_8 = date(2025, 9, 8)
+    week_sep_8 = date(2026, 9, 7)
     assert lesson_visible_on_week(military, 1, week_sep_8) is True
     assert lesson_visible_on_week(anatomy, 1, week_sep_8) is False
 
-    week_sep_22 = date(2025, 9, 22)
+    week_sep_22 = date(2026, 9, 21)
     assert lesson_visible_on_week(military, 1, week_sep_22) is True
     assert lesson_visible_on_week(anatomy, 1, week_sep_22) is False
 
 
 def test_lesson_without_dates_always_visible():
     lesson = {"subject": "Физика", "extra": "ауд. 101"}
-    week = date(2025, 9, 15)
+    week = date(2026, 9, 14)
     assert lesson_visible_on_week(lesson, 1, week) is True
 
 
@@ -57,7 +57,7 @@ def test_filter_weekly_schedule_sets_label():
             {"subject": "Биохимия", "extra": "17,24/11; 1/12", "start": "10.00", "end": "11.40"},
         ],
     }
-    week = date(2025, 9, 15)
+    week = date(2026, 9, 14)
     filtered = filter_weekly_schedule(schedule, week)
     assert len(filtered["1"]) == 1
     assert filtered["1"][0]["subject"] == "Анатомия"
@@ -71,7 +71,7 @@ def test_dated_slot_hides_other_subjects_and_undated():
         {"subject": "Биохимия", "extra": "17,24/11; 1/12", "start": "10.00", "end": "11.40"},
         {"subject": "Физика", "extra": "ауд. 101", "start": "10.00", "end": "11.40"},
     ]
-    week = date(2025, 9, 15)
+    week = date(2026, 9, 14)
     filtered = filter_day_lessons(lessons, 1, week)
     assert [item["subject"] for item in filtered] == ["Анатомия"]
 
@@ -81,6 +81,6 @@ def test_undated_slot_still_shows_regular_lessons():
         {"subject": "Физика", "extra": "ауд. 101", "start": "12.00", "end": "13.30"},
         {"subject": "Химия", "extra": "ауд. 202", "start": "12.00", "end": "13.30"},
     ]
-    week = date(2025, 9, 15)
+    week = date(2026, 9, 14)
     filtered = filter_day_lessons(lessons, 1, week)
     assert len(filtered) == 2

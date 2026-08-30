@@ -24,7 +24,6 @@ from bot.db.repository import (
     is_rzgmu_source,
     parse_rsreu_ref,
     resolve_schedule_for_view,
-    schedule_is_calendar_format,
     set_user_subscription,
 )
 from bot.utils.course import effective_course_number
@@ -66,7 +65,12 @@ def _schedule_header(
     week_label = None
     if schedule:
         week_meta = schedule.get("__week__", {})
-        week_label = week_meta.get("type_label") or week_meta.get("calendar_label")
+        calendar = week_meta.get("calendar_label")
+        type_label = week_meta.get("type_label")
+        if calendar and type_label:
+            week_label = f"{calendar} · {type_label}"
+        else:
+            week_label = calendar or type_label
     return format_schedule_header(source, group_number, week_type_label=week_label)
 
 
@@ -86,9 +90,7 @@ def _calendar_week_from_schedule(schedule: dict | None) -> tuple[str | None, str
 def _show_week_nav(source: ScheduleSource, schedule: dict | None) -> bool:
     if is_rsreu_source(source.pdf_path):
         return True
-    if is_rzgmu_source(source.pdf_path):
-        return not schedule_is_calendar_format(schedule)
-    return False
+    return is_rzgmu_source(source.pdf_path)
 
 
 def _week_type_for_view(source: ScheduleSource, week_start: date | None) -> str | None:

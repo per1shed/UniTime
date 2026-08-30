@@ -37,6 +37,7 @@ def universities_keyboard(universities: list[University]) -> InlineKeyboardMarku
                 callback_data=f"uni:{university.id}",
             )
         )
+    builder.row(_btn("Главное меню", "menu:main", e.USER))
     return builder.as_markup()
 
 

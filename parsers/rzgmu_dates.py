@@ -112,7 +112,10 @@ def lesson_visible_on_week(
     explicit, date_range = parse_extra_dates(extra, reference=week_start)
 
     if explicit:
-        return any(week_start <= item <= week_end for item in explicit)
+        return any(
+            item.weekday() == day_index and week_start <= item <= week_end
+            for item in explicit
+        )
 
     if date_range:
         start, end = date_range

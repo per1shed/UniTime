@@ -16,6 +16,24 @@ LESSON_TYPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+LESSON_TYPE_BY_CELL_CLASS = {
+    "schedule-lesson-type-1": "Лек.",
+    "schedule-lesson-type-2": "Лаб.",
+    "schedule-lesson-type-3": "Упр.",
+}
+
+LESSON_TYPE_PREFIXES = (
+    "Лек.",
+    "Лаб.",
+    "Упр.",
+    "Практ.",
+    "Сем.",
+    "Конс.",
+    "Зач.",
+    "Экз.",
+    "Диф.зач.",
+)
+
 NUMERATOR = "numerator"
 DENOMINATOR = "denominator"
 
@@ -87,6 +105,97 @@ def pick_week_by_start(weeks: list["WeekInfo"], week_start: date) -> "WeekInfo |
         return max(past, key=lambda week: week.date)
 
     return min(weeks, key=lambda week: week.date)
+
+
+def weeks_window(
+    weeks: list["WeekInfo"],
+    today: date | None = None,
+    *,
+    before: int = 2,
+    after: int = 6,
+) -> list["WeekInfo"]:
+    """Return a slice of weeks around the current one for caching."""
+    if not weeks:
+        return []
+    current = pick_current_week(weeks, today)
+    if not current:
+        return weeks[: before + after + 1]
+    try:
+        index = next(i for i, week in enumerate(weeks) if week.date == current.date)
+    except StopIteration:
+        return weeks[: before + after + 1]
+    start = max(0, index - before)
+    end = min(len(weeks), index + after + 1)
+    return weeks[start:end]
+
+
+def schedule_from_weeks_cache(
+    cached: dict | None,
+    week_start: date | None = None,
+    *,
+    today: date | None = None,
+) -> dict | None:
+    """Pick a concrete week schedule from multi-week RSREU cache."""
+    if not cached:
+        return None
+
+    weeks_map = cached.get("__weeks__")
+    if not isinstance(weeks_map, dict) or not weeks_map:
+        return dict(cached)
+
+    infos = [
+        WeekInfo(date=key, label=(value or {}).get("__week__", {}).get("label", key))
+        for key, value in weeks_map.items()
+        if isinstance(value, dict)
+    ]
+    infos.sort(key=lambda item: item.date)
+    if not infos:
+        return dict(cached)
+
+    if week_start is not None:
+        selected = pick_week_by_start(infos, week_start)
+    else:
+        selected = pick_current_week(infos, today)
+    if not selected:
+        selected = infos[0]
+
+    week_data = weeks_map.get(selected.date)
+    if not isinstance(week_data, dict):
+        return dict(cached)
+
+    result = {key: value for key, value in week_data.items() if not str(key).startswith("__")}
+    result["__week__"] = dict(week_data.get("__week__", {}))
+    result["__weeks__"] = weeks_map
+    return result
+
+
+def schedule_has_lesson_types(schedule: dict | None) -> bool:
+    """True when cached RSREU schedule already includes lesson type prefixes."""
+    if not schedule:
+        return False
+
+    meta = schedule.get("__meta__", {})
+    if meta.get("lesson_types"):
+        return True
+
+    weeks_map = schedule.get("__weeks__")
+    candidates: list[dict] = []
+    if isinstance(weeks_map, dict) and weeks_map:
+        candidates.extend(item for item in weeks_map.values() if isinstance(item, dict))
+    else:
+        candidates.append(schedule)
+
+    for item in candidates:
+        for key, day in item.items():
+            if str(key).startswith("__") or not isinstance(day, list):
+                continue
+            for lesson in day:
+                if not isinstance(lesson, dict):
+                    continue
+                subject = str(lesson.get("subject", ""))
+                if any(subject.startswith(prefix) for prefix in LESSON_TYPE_PREFIXES):
+                    return True
+    return False
 
 
 @dataclass
@@ -250,31 +359,67 @@ class RsreuHtmlParser:
 
     def _lesson_type_from_block(self, block: Tag) -> str:
         badge = block.select_one(".schedule-lesson-type-badge")
-        if not badge:
+        if badge:
+            return self._normalize_lesson_type(badge.get_text(" ", strip=True))
+        return ""
+
+    def _lesson_type_from_cell(self, cell: Tag) -> str:
+        for class_name in cell.get("class", []):
+            if class_name in LESSON_TYPE_BY_CELL_CLASS:
+                return LESSON_TYPE_BY_CELL_CLASS[class_name]
+        return ""
+
+    @staticmethod
+    def _normalize_lesson_type(value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
             return ""
-        return badge.get_text(" ", strip=True)
+        if cleaned.endswith("."):
+            return cleaned
+        lowered = cleaned.lower().rstrip(".")
+        aliases = {
+            "лек": "Лек.",
+            "лаб": "Лаб.",
+            "упр": "Упр.",
+            "практ": "Практ.",
+            "сем": "Сем.",
+        }
+        return aliases.get(lowered, cleaned)
 
     def _parse_lesson_cell(
         self, cell: Tag, start: str, end: str
     ) -> list[dict]:
-        if not cell.get("class") or "schedule-cell" not in cell.get("class", []):
+        classes = cell.get("class", [])
+        if not classes or "schedule-cell" not in classes:
             return []
 
+        cell_type = self._lesson_type_from_cell(cell)
+        blocks = cell.find_all("div", recursive=False)
+        if not blocks:
+            blocks = [cell]
+
         lessons: list[dict] = []
-        for block in cell.find_all("div", recursive=False):
-            lesson_type = self._lesson_type_from_block(block)
-            text = self._cell_block_text(block)
-            if not text:
-                continue
-            subject, extra = self._split_subject_extra(text, lesson_type=lesson_type)
-            lessons.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "subject": subject,
-                    "extra": extra,
-                }
-            )
+        for block in blocks:
+            nested = [
+                item
+                for item in block.find_all("div", recursive=False)
+                if item.select_one(".schedule-lesson-type-badge") or item.get_text(strip=True)
+            ]
+            targets = nested if len(nested) > 1 else [block]
+            for target in targets:
+                lesson_type = self._lesson_type_from_block(target) or cell_type
+                text = self._cell_block_text(target)
+                if not text:
+                    continue
+                subject, extra = self._split_subject_extra(text, lesson_type=lesson_type)
+                lessons.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "subject": subject,
+                        "extra": extra,
+                    }
+                )
         return lessons
 
     def _cell_block_text(self, block: Tag) -> str:
@@ -286,10 +431,10 @@ class RsreuHtmlParser:
         return text.strip()
 
     def _split_subject_extra(self, text: str, *, lesson_type: str = "") -> tuple[str, str]:
-        type_prefix = lesson_type.strip()
+        type_prefix = self._normalize_lesson_type(lesson_type)
         match = LESSON_TYPE_RE.match(text)
         if match:
-            type_prefix = match.group(1).strip()
+            type_prefix = self._normalize_lesson_type(match.group(1))
             text = text[match.end():].strip()
         text = text.replace("\xa0", " ")
         lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n") if line.strip()]

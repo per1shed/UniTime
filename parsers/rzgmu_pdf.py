@@ -216,20 +216,36 @@ def _split_location(text: str) -> tuple[str, str]:
     return text[:start].strip(" ,;"), text[start:].strip(" ,;")
 
 
-def _lesson_type_from_lines(raw_lines: list[str]) -> str:
-    for line in raw_lines[:3]:
-        lowered = line.lower().strip(" ,;")
-        if not lowered or len(lowered) > 48:
-            continue
-        if "лекци" in lowered or lowered.startswith("лек."):
-            return "Лек."
-        if "практ" in lowered or lowered.startswith("пр."):
-            return "Практ."
-        if "лабор" in lowered or lowered.startswith("лаб."):
-            return "Лаб."
-        if "семин" in lowered:
-            return "Сем."
+def _lesson_type_from_line(line: str) -> str:
+    lowered = line.lower().strip(" ,;")
+    if not lowered:
+        return ""
+    if re.fullmatch(r"лекции|лек\.", lowered):
+        return "Лек."
+    if re.fullmatch(r"практические(?:\s+занятия)?|практика|практ\.|пр\.", lowered):
+        return "Практ."
+    if re.fullmatch(r"лабораторные(?:\s+занятия)?|лабораторная|лаб\.|лабораторн\.", lowered):
+        return "Лаб."
+    if re.fullmatch(r"семинар(?:ские)?(?:\s+занятия)?|сем\.", lowered):
+        return "Сем."
+    if re.search(r"\bлекции\s*$", lowered) and len(lowered) <= 32:
+        return "Лек."
+    if re.search(r"\bпрактические\s*$", lowered) and len(lowered) <= 32:
+        return "Практ."
     return ""
+
+
+def _lesson_type_from_lines(raw_lines: list[str]) -> str:
+    """Return a type prefix only when the cell explicitly marks lesson type."""
+    for line in raw_lines[:3]:
+        prefix = _lesson_type_from_line(line)
+        if prefix:
+            return prefix
+    return ""
+
+
+def _is_explicit_type_line(line: str) -> bool:
+    return bool(_lesson_type_from_line(line))
 
 
 def _with_lesson_type(subject: str, type_prefix: str) -> str:
@@ -258,7 +274,7 @@ def _split_lecture_segment(segment: str, *, type_prefix: str = "") -> tuple[str,
         extra_parts = [location]
 
     subject = re.sub(r"\s+", " ", subject).strip() or "Занятие"
-    subject = _with_lesson_type(subject, type_prefix or "Лек.")
+    subject = _with_lesson_type(subject, type_prefix)
     extra = " ".join(part for part in extra_parts if part).strip()
     return subject, extra
 
@@ -269,14 +285,16 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
         return []
 
     raw_lines = [line.strip() for line in chunk.split("\n") if line.strip()]
-    is_lecture_block = any("лекции" in line.lower() for line in raw_lines)
-    type_prefix = "Лек." if is_lecture_block else _lesson_type_from_lines(raw_lines)
+    is_lecture_block = any(_is_explicit_type_line(line) and _lesson_type_from_line(line) == "Лек." for line in raw_lines)
+    type_prefix = _lesson_type_from_lines(raw_lines)
 
     if is_lecture_block:
         segments: list[str] = []
         for line in raw_lines:
+            if _is_explicit_type_line(line):
+                continue
             cleaned = re.sub(r"^Лекции\s+", "", line, flags=re.IGNORECASE).strip()
-            if cleaned and "лекции" not in cleaned.lower():
+            if cleaned:
                 segments.append(cleaned)
 
         shared_location = ""
@@ -292,7 +310,8 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
             lessons.append(ParsedLesson(start=start, end=end, subject=subject, extra=extra))
         return lessons
 
-    flat = re.sub(r"\s*\|\s*", " ", " ".join(raw_lines))
+    content_lines = [line for line in raw_lines if not _is_explicit_type_line(line)]
+    flat = re.sub(r"\s*\|\s*", " ", " ".join(content_lines))
     flat = re.sub(r"\s+", " ", flat).strip()
     subject, extra = _split_lecture_segment(flat, type_prefix=type_prefix)
     return [ParsedLesson(start=start, end=end, subject=subject, extra=extra)]

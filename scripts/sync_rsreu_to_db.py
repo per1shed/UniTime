@@ -33,6 +33,7 @@ from bot.db.models import ScheduleSource, Specialty, University
 from bot.db.repository import ensure_universities, get_group_schedule, parse_rsreu_ref
 from bot.db.session import create_session_factory, init_db
 from bot.services.sync import ScheduleSyncService
+from parsers.rsreu_html import schedule_has_lesson_types
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,9 +47,10 @@ _FETCH_RETRIES = 3
 def _schedule_is_cached(schedule: dict | None) -> bool:
     if not schedule:
         return False
-    if schedule.get("__week__", {}).get("date"):
-        return True
-    return any(schedule.get(str(day)) for day in range(7))
+    weeks_map = schedule.get("__weeks__")
+    if not isinstance(weeks_map, dict) or len(weeks_map) < 2:
+        return False
+    return schedule_has_lesson_types(schedule)
 
 
 async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int, int]:
@@ -91,7 +93,12 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int, int]
                 last_error: Exception | None = None
                 for attempt in range(_FETCH_RETRIES):
                     try:
-                        schedule = await sync.load_rsreu_schedule(session, source.id, group_id)
+                        schedule = await sync.load_rsreu_schedule(
+                            session,
+                            source.id,
+                            group_id,
+                            cache_weeks=True,
+                        )
                         await session.commit()
                         async with lock:
                             if schedule:
