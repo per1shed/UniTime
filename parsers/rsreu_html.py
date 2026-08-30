@@ -394,6 +394,10 @@ class RsreuHtmlParser:
             return []
 
         cell_type = self._lesson_type_from_cell(cell)
+        cell_badge = cell.select_one(".schedule-lesson-type-badge")
+        if cell_badge and not cell_type:
+            cell_type = self._normalize_lesson_type(cell_badge.get_text(" ", strip=True))
+
         blocks = cell.find_all("div", recursive=False)
         if not blocks:
             blocks = [cell]
@@ -407,7 +411,10 @@ class RsreuHtmlParser:
             ]
             targets = nested if len(nested) > 1 else [block]
             for target in targets:
-                lesson_type = self._lesson_type_from_block(target) or cell_type
+                lesson_type = (
+                    self._lesson_type_from_block(target)
+                    or cell_type
+                )
                 text = self._cell_block_text(target)
                 if not text:
                     continue
@@ -418,6 +425,7 @@ class RsreuHtmlParser:
                         "end": end,
                         "subject": subject,
                         "extra": extra,
+                        "type": lesson_type,
                     }
                 )
         return lessons

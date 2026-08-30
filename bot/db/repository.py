@@ -541,15 +541,21 @@ def _lesson_is_ongoing(
 
 
 def lessons_from_day_data(day_data: list[dict]) -> list[Lesson]:
-    lessons = [
-        Lesson(
-            start=item["start"],
-            end=item["end"],
-            subject=item["subject"],
-            extra=item.get("extra", ""),
+    lessons: list[Lesson] = []
+    type_prefixes = ("Лек.", "Лаб.", "Упр.", "Практ.", "Сем.", "Конс.", "Зач.", "Экз.")
+    for item in day_data:
+        subject = str(item.get("subject", "") or "")
+        lesson_type = str(item.get("type", "") or "").strip()
+        if lesson_type and not any(subject.startswith(prefix) for prefix in type_prefixes):
+            subject = f"{lesson_type} {subject}".strip()
+        lessons.append(
+            Lesson(
+                start=item["start"],
+                end=item["end"],
+                subject=subject,
+                extra=item.get("extra", ""),
+            )
         )
-        for item in day_data
-    ]
     return merge_subgroup_lessons(lessons)
 
 

@@ -282,6 +282,7 @@ def schedule_nav_keyboard(
 
     if include_back and back_callback:
         builder.row(_back_button(back_callback))
+    builder.row(_btn("Главное меню", "menu:main", e.USER))
     return builder.as_markup()
 
 
