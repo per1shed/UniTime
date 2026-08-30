@@ -107,6 +107,46 @@ def pick_week_by_start(weeks: list["WeekInfo"], week_start: date) -> "WeekInfo |
     return min(weeks, key=lambda week: week.date)
 
 
+def cached_week_dates(cached: dict | None) -> list[date]:
+    """Sorted week start dates available in a multi-week RSREU cache."""
+    if not cached:
+        return []
+    weeks_map = cached.get("__weeks__")
+    if not isinstance(weeks_map, dict) or not weeks_map:
+        return []
+    dates: list[date] = []
+    for key in weeks_map:
+        try:
+            dates.append(date.fromisoformat(str(key)))
+        except ValueError:
+            continue
+    dates.sort()
+    return dates
+
+
+def neighbor_week_start(
+    cached: dict | None,
+    current: date,
+    delta: int,
+) -> date | None:
+    """Move to the previous/next cached week. Returns None at the boundary."""
+    dates = cached_week_dates(cached)
+    if not dates:
+        return None
+
+    if current in dates:
+        index = dates.index(current)
+    else:
+        # Snap to the nearest week at/before current, else the first one.
+        past = [item for item in dates if item <= current]
+        index = dates.index(max(past)) if past else 0
+
+    target = index + delta
+    if target < 0 or target >= len(dates):
+        return None
+    return dates[target]
+
+
 def weeks_window(
     weeks: list["WeekInfo"],
     today: date | None = None,
@@ -166,6 +206,15 @@ def schedule_from_weeks_cache(
     result = {key: value for key, value in week_data.items() if not str(key).startswith("__")}
     result["__week__"] = dict(week_data.get("__week__", {}))
     result["__weeks__"] = weeks_map
+    from parsers.rzgmu_dates import monday_of, week_label
+
+    week_date = result["__week__"].get("date") or selected.date
+    try:
+        label_start = monday_of(date.fromisoformat(str(week_date)))
+    except ValueError:
+        label_start = monday_of(date.fromisoformat(selected.date))
+    result["__week__"]["calendar_start"] = label_start.isoformat()
+    result["__week__"]["calendar_label"] = week_label(label_start)
     return result
 
 

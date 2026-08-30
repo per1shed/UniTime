@@ -172,20 +172,29 @@ def resolve_schedule_for_view(
         return filter_weekly_schedule(resolved, selected_week_start)
 
     if is_rsreu_source(pdf_path):
+        from parsers.rsreu_html import schedule_from_weeks_cache
         from parsers.rzgmu_dates import monday_of as _monday_of
 
-        result = {key: value for key, value in schedule.items() if key != "__weeks__"}
+        selected = schedule_from_weeks_cache(
+            schedule,
+            week_start,
+            today=moment.date(),
+        ) or schedule
+        result = {key: value for key, value in selected.items() if key != "__weeks__"}
         week_meta = dict(result.get("__week__", {}))
         cached_week_date = week_meta.get("date")
-        if week_start is not None:
-            label_start = week_start
-        elif cached_week_date:
+        if cached_week_date:
             try:
-                label_start = _monday_of(date.fromisoformat(cached_week_date))
+                label_start = _monday_of(date.fromisoformat(str(cached_week_date)))
             except ValueError:
-                label_start = selected_week_start
+                label_start = week_start or selected_week_start
+        elif week_meta.get("calendar_start"):
+            try:
+                label_start = date.fromisoformat(str(week_meta["calendar_start"]))
+            except ValueError:
+                label_start = week_start or selected_week_start
         else:
-            label_start = selected_week_start
+            label_start = week_start or selected_week_start
         week_meta["calendar_start"] = label_start.isoformat()
         week_meta["calendar_label"] = week_label(label_start)
         result["__week__"] = week_meta

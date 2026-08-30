@@ -41,6 +41,7 @@ from bot.keyboards.inline import (
     variants_keyboard,
 )
 from parsers.rsreu_faculties import RSREU_FACULTIES
+from parsers.rsreu_html import neighbor_week_start
 from parsers.rzgmu_dates import shift_week
 from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
 from parsers.rzgmu_week import week_type_for_date
@@ -208,7 +209,12 @@ async def _edit_or_answer(callback: CallbackQuery, text: str, reply_markup) -> N
         chat_id = callback.message.chat.id
         message_id = callback.message.message_id
         await tracker.clear_old(callback.bot, chat_id, except_message_id=message_id)
-        await callback.message.edit_text(text, reply_markup=reply_markup)
+        try:
+            await callback.message.edit_text(text, reply_markup=reply_markup)
+        except Exception as exc:
+            # Telegram raises if text+keyboard are unchanged.
+            if "message is not modified" not in str(exc).lower():
+                raise
         tracker.register(chat_id, message_id)
     else:
         await callback.answer(text, show_alert=True)
@@ -1199,7 +1205,24 @@ async def on_week_shift(
         callback.data
     )
     delta = -1 if prefix == "rwp" else 1
-    new_week = shift_week(week_start, delta)
+
+    async with session_factory() as session:
+        source = await _load_schedule_source(session, source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+
+        new_week = shift_week(week_start, delta)
+        if is_rsreu_source(source.pdf_path):
+            from bot.db.repository import get_group_schedule
+
+            cached = await get_group_schedule(session, source_id, group_number)
+            neighbor = neighbor_week_start(cached, week_start, delta)
+            if neighbor is None:
+                edge = "предыдущей" if delta < 0 else "следующей"
+                await callback.answer(f"Нет {edge} недели в кэше.", show_alert=True)
+                return
+            new_week = neighbor
 
     await _render_schedule_view(
         callback,
@@ -1209,6 +1232,7 @@ async def on_week_shift(
         group_number,
         week_start=new_week,
         include_back=include_back,
+        specialty_id=source.specialty_id,
     )
     await callback.answer()
 
