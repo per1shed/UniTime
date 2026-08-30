@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -22,7 +22,12 @@ from bot.db.repository import (
 )
 from parsers.rsreu_course import course_from_group_label as course_from_rsreu_group_label
 from parsers.rsreu_faculties import RSREU_FACULTIES
-from parsers.rsreu_html import RsreuHtmlParser, pick_current_week, pick_week_by_type
+from parsers.rsreu_html import (
+    RsreuHtmlParser,
+    pick_current_week,
+    pick_week_by_start,
+    pick_week_by_type,
+)
 from parsers.rsreu_http import create_rsreu_client
 from parsers.rzgmu_html import RzgmuHtmlParser, ScheduleLink, SpecialtyInfo
 from parsers.rzgmu_http import create_rzgmu_client
@@ -207,6 +212,7 @@ class ScheduleSyncService:
         group_number: int,
         *,
         week_type: str | None = None,
+        week_start: date | None = None,
     ) -> dict | None:
         source = await session.get(ScheduleSource, source_id)
         if not source or not is_rsreu_source(source.pdf_path):
@@ -233,7 +239,9 @@ class ScheduleSyncService:
 
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
         weeks = await self.rsreu_parser.fetch_weeks(faculty_id, group_id)
-        if week_type:
+        if week_start:
+            selected_week = pick_week_by_start(weeks, week_start)
+        elif week_type:
             selected_week = pick_week_by_type(weeks, week_type, today)
         else:
             selected_week = pick_current_week(weeks, today)
@@ -245,6 +253,7 @@ class ScheduleSyncService:
             group_id,
             selected_week.date,
             today=today,
+            weeks=weeks,
         )
         if schedule:
             await save_schedule_cache(session, source_id, {group_number: schedule})

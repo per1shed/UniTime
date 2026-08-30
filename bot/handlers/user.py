@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -9,30 +10,26 @@ from sqlalchemy.orm import selectinload
 
 from bot import emoji as e
 from bot.config import get_settings
-from bot.messages import entry_text, loading_text, main_menu_text, schedule_choice_text, step_text, user_nick
+from bot.messages import entry_text, loading_text, main_menu_text, step_text, user_nick
 from bot.db.models import ScheduleSource, Specialty, University, User
 from bot.db.repository import (
-    format_day_schedule_message,
     format_schedule_header,
     format_week_schedule_message,
     get_available_groups,
-    get_group_schedule,
     get_or_create_user,
     get_university_by_id,
     get_user_subscription,
     is_portal_source,
     is_rsreu_source,
     is_rzgmu_source,
-    lessons_from_day_data,
     parse_rsreu_ref,
     resolve_schedule_for_view,
-    schedule_has_week_types,
+    schedule_is_calendar_format,
     set_user_subscription,
 )
 from bot.utils.course import effective_course_number
 from bot.keyboards.inline import (
     courses_keyboard,
-    day_selector_keyboard,
     schedule_nav_keyboard,
     faculties_for_course_keyboard,
     groups_keyboard,
@@ -45,7 +42,9 @@ from bot.keyboards.inline import (
     variants_keyboard,
 )
 from parsers.rsreu_faculties import RSREU_FACULTIES
+from parsers.rzgmu_dates import shift_week
 from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
+from parsers.rzgmu_week import week_type_for_date
 from bot.services.keyboard_tracker import get_keyboard_tracker
 from bot.services.sync import ScheduleSyncService
 from bot.states.flow import FlowStorage
@@ -66,8 +65,36 @@ def _schedule_header(
 ) -> str:
     week_label = None
     if schedule:
-        week_label = schedule.get("__week__", {}).get("type_label") or None
+        week_meta = schedule.get("__week__", {})
+        week_label = week_meta.get("type_label") or week_meta.get("calendar_label")
     return format_schedule_header(source, group_number, week_type_label=week_label)
+
+
+def _parse_week_nav_callback(data: str) -> tuple[str, int, int, date, bool]:
+    parts = data.split(":")
+    include_back = len(parts) > 4 and parts[4] == "back"
+    return parts[0], int(parts[1]), int(parts[2]), date.fromisoformat(parts[3]), include_back
+
+
+def _calendar_week_from_schedule(schedule: dict | None) -> tuple[str | None, str | None]:
+    if not schedule:
+        return None, None
+    week_meta = schedule.get("__week__", {})
+    return week_meta.get("calendar_start"), week_meta.get("calendar_label")
+
+
+def _show_week_nav(source: ScheduleSource, schedule: dict | None) -> bool:
+    if is_rsreu_source(source.pdf_path):
+        return True
+    if is_rzgmu_source(source.pdf_path):
+        return not schedule_is_calendar_format(schedule)
+    return False
+
+
+def _week_type_for_view(source: ScheduleSource, week_start: date | None) -> str | None:
+    if week_start and is_rzgmu_source(source.pdf_path):
+        return week_type_for_date(week_start)
+    return None
 
 
 async def _load_view_schedule(
@@ -77,36 +104,28 @@ async def _load_view_schedule(
     source_id: int,
     group_number: int,
     *,
-    rsreu_week_type: str | None = None,
+    week_start: date | None = None,
 ) -> dict | None:
+    week_type = _week_type_for_view(source, week_start)
     if is_rsreu_source(source.pdf_path):
         schedule = await sync_service.load_rsreu_schedule(
             session,
             source_id,
             group_number,
-            week_type=rsreu_week_type,
+            week_start=week_start,
         )
     else:
+        from bot.db.repository import get_group_schedule
+
         schedule = await get_group_schedule(session, source_id, group_number)
     if not schedule:
         return None
     return resolve_schedule_for_view(
         schedule,
         source.pdf_path,
-        week_type=rsreu_week_type,
+        week_type=week_type,
+        week_start=week_start,
     )
-
-
-def _week_type(schedule: dict | None) -> str | None:
-    if not schedule:
-        return None
-    return schedule.get("__week__", {}).get("type")
-
-
-def _show_week_switch(source: ScheduleSource, schedule: dict | None) -> bool:
-    if is_rsreu_source(source.pdf_path):
-        return True
-    return is_rzgmu_source(source.pdf_path) and schedule_has_week_types(schedule)
 
 
 def _schedule_nav_for(
@@ -116,21 +135,60 @@ def _schedule_nav_for(
     schedule: dict | None = None,
     *,
     specialty_id: int | None = None,
-    selected_day: int | None = None,
-    selected_week: bool = False,
     include_back: bool = False,
 ):
-    rsreu = is_rsreu_source(source.pdf_path)
+    week_start, week_label_text = _calendar_week_from_schedule(schedule)
     return schedule_nav_keyboard(
         source_id,
         group_number,
-        selected_day=selected_day,
-        selected_week=selected_week,
         include_back=include_back,
         back_callback=f"back:groups:{source_id}:{specialty_id}" if specialty_id else None,
-        show_rsreu_week_switch=_show_week_switch(source, schedule),
-        rsreu_week_type=_week_type(schedule),
+        show_week_nav=_show_week_nav(source, schedule),
+        week_start=week_start,
+        week_label_text=week_label_text,
     )
+
+
+async def _render_schedule_view(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
+    source_id: int,
+    group_number: int,
+    *,
+    week_start: date | None = None,
+    include_back: bool = False,
+    specialty_id: int | None = None,
+) -> None:
+    async with session_factory() as session:
+        source = await _load_schedule_source(session, source_id)
+        if not source:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = await _load_view_schedule(
+            session,
+            sync_service,
+            source,
+            source_id,
+            group_number,
+            week_start=week_start,
+        )
+        if not schedule:
+            await callback.answer("Расписание не найдено.", show_alert=True)
+            return
+
+    tz = get_settings().timezone
+    header = _schedule_header(source, group_number, schedule)
+    text = format_week_schedule_message(header, schedule, tz)
+    keyboard = _schedule_nav_for(
+        source,
+        source_id,
+        group_number,
+        schedule,
+        specialty_id=specialty_id or source.specialty_id,
+        include_back=include_back,
+    )
+    await _edit_or_answer(callback, text, keyboard)
 
 
 async def _load_schedule_source(session: AsyncSession, source_id: int) -> ScheduleSource | None:
@@ -1011,19 +1069,14 @@ async def on_portal_group_selected(
         await callback.answer("Расписание группы не найдено.", show_alert=True)
         return
 
-    header = _schedule_header(source, group_id, schedule)
-    context = header
-
-    await _edit_or_answer(
+    await _render_schedule_view(
         callback,
-        schedule_choice_text(context),
-        day_selector_keyboard(
-            source_id,
-            group_id,
-            source.specialty_id,
-            show_rsreu_week_switch=True,
-            rsreu_week_type=_week_type(schedule),
-        ),
+        session_factory,
+        sync_service,
+        source_id,
+        group_id,
+        include_back=True,
+        specialty_id=source.specialty_id,
     )
     await callback.answer("Расписание сохранено")
 
@@ -1091,6 +1144,7 @@ async def on_group_page(
 async def on_group_selected(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
+    sync_service: ScheduleSyncService,
 ) -> None:
     _, source_id_str, group_number_str = callback.data.split(":")
     source_id = int(source_id_str)
@@ -1114,90 +1168,61 @@ async def on_group_selected(
             .where(ScheduleSource.id == source_id)
         )
         source = (await session.execute(stmt)).scalar_one()
-        schedule = await get_group_schedule(session, source_id, group_number)
+        schedule = await _load_view_schedule(
+            session, sync_service, source, source_id, group_number
+        )
         await session.commit()
 
     if not schedule:
         await callback.answer("Расписание группы не найдено.", show_alert=True)
         return
 
-    context = (
-        f"<b>{source.specialty.university.name}</b>\n"
-        f"{source.specialty.name} · {source.course_number} курс\n"
-        f"Группа {group_number} · {source.variant_name}"
-    )
-
-    await _edit_or_answer(
+    await _render_schedule_view(
         callback,
-        schedule_choice_text(context),
-        day_selector_keyboard(source_id, group_number, source.specialty_id),
+        session_factory,
+        sync_service,
+        source_id,
+        group_number,
+        include_back=True,
+        specialty_id=source.specialty_id,
     )
     await callback.answer("Расписание сохранено")
 
 
-@router.callback_query(F.data.startswith("day:"))
-async def on_day_selected(
+@router.callback_query(F.data.regexp(r"^rw[pn]:"))
+async def on_week_shift(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     sync_service: ScheduleSyncService,
 ) -> None:
-    _, source_id_str, group_number_str, day_str = callback.data.split(":")
-    source_id = int(source_id_str)
-    group_number = int(group_number_str)
-    day_index = int(day_str)
+    prefix, source_id, group_number, week_start, include_back = _parse_week_nav_callback(
+        callback.data
+    )
+    delta = -1 if prefix == "rwp" else 1
+    new_week = shift_week(week_start, delta)
 
-    async with session_factory() as session:
-        source = await _load_schedule_source(session, source_id)
-        if not source:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-        schedule = await _load_view_schedule(
-            session, sync_service, source, source_id, group_number
-        )
-        if not schedule:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-
-    lessons = lessons_from_day_data(schedule.get(str(day_index), []))
-    tz = get_settings().timezone
-    header = _schedule_header(source, group_number, schedule)
-    text = format_day_schedule_message(header, day_index, lessons, tz)
-    await _edit_or_answer(
+    await _render_schedule_view(
         callback,
-        text,
-        _schedule_nav_for(
-            source,
-            source_id,
-            group_number,
-            schedule,
-            selected_day=day_index,
-        ),
+        session_factory,
+        sync_service,
+        source_id,
+        group_number,
+        week_start=new_week,
+        include_back=include_back,
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("rwk:"))
-async def on_rsreu_week_type_selected(
+@router.callback_query(F.data.startswith("rwc:"))
+async def on_week_label(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],
     sync_service: ScheduleSyncService,
 ) -> None:
-    parts = callback.data.split(":")
-    source_id = int(parts[1])
-    group_number = int(parts[2])
-    week_type = parts[3]
-    day_index = int(parts[4]) if len(parts) > 4 else None
-
-    if week_type not in {"numerator", "denominator"}:
-        await callback.answer("Некорректный тип недели.", show_alert=True)
-        return
-
+    _, source_id, group_number, week_start, _ = _parse_week_nav_callback(callback.data)
     async with session_factory() as session:
         source = await _load_schedule_source(session, source_id)
         if not source:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-        if not is_rsreu_source(source.pdf_path) and not is_rzgmu_source(source.pdf_path):
             await callback.answer("Расписание не найдено.", show_alert=True)
             return
         schedule = await _load_view_schedule(
@@ -1206,76 +1231,10 @@ async def on_rsreu_week_type_selected(
             source,
             source_id,
             group_number,
-            rsreu_week_type=week_type,
+            week_start=week_start,
         )
-        if not schedule:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-
-    tz = get_settings().timezone
-    header = _schedule_header(source, group_number, schedule)
-    if day_index is not None:
-        lessons = lessons_from_day_data(schedule.get(str(day_index), []))
-        text = format_day_schedule_message(header, day_index, lessons, tz)
-        keyboard = _schedule_nav_for(
-            source,
-            source_id,
-            group_number,
-            schedule,
-            selected_day=day_index,
-        )
-    else:
-        text = format_week_schedule_message(header, schedule, tz)
-        keyboard = _schedule_nav_for(
-            source,
-            source_id,
-            group_number,
-            schedule,
-            selected_week=True,
-        )
-
-    await _edit_or_answer(callback, text, keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("week:"))
-async def on_week_selected(
-    callback: CallbackQuery,
-    session_factory: async_sessionmaker[AsyncSession],
-    sync_service: ScheduleSyncService,
-) -> None:
-    _, source_id_str, group_number_str = callback.data.split(":")
-    source_id = int(source_id_str)
-    group_number = int(group_number_str)
-
-    async with session_factory() as session:
-        source = await _load_schedule_source(session, source_id)
-        if not source:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-        schedule = await _load_view_schedule(
-            session, sync_service, source, source_id, group_number
-        )
-
-    if not schedule:
-        await callback.answer("Расписание не найдено.", show_alert=True)
-        return
-
-    tz = get_settings().timezone
-    header = _schedule_header(source, group_number, schedule)
-    text = format_week_schedule_message(header, schedule, tz)
-    await _edit_or_answer(
-        callback,
-        text,
-        _schedule_nav_for(
-            source,
-            source_id,
-            group_number,
-            schedule,
-            selected_week=True,
-        ),
-    )
-    await callback.answer()
+    label = _calendar_week_from_schedule(schedule)[1] or week_start.strftime("%d.%m.%Y")
+    await callback.answer(f"Неделя {label}", show_alert=False)
 
 
 @router.callback_query(F.data == "menu:my")
@@ -1290,31 +1249,12 @@ async def on_my_schedule(
             await callback.answer("Сначала выберите расписание.", show_alert=True)
             return
 
-        source = await _load_schedule_source(session, sub.source_id)
-        if not source:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-        schedule = await _load_view_schedule(
-            session, sync_service, source, sub.source_id, sub.group_number
-        )
-
-    if not schedule:
-        await callback.answer("Расписание не найдено.", show_alert=True)
-        return
-
-    tz = get_settings().timezone
-    header = _schedule_header(source, sub.group_number, schedule)
-    text = format_week_schedule_message(header, schedule, tz)
-    await _edit_or_answer(
+    await _render_schedule_view(
         callback,
-        text,
-        _schedule_nav_for(
-            source,
-            sub.source_id,
-            sub.group_number,
-            schedule,
-            selected_week=True,
-        ),
+        session_factory,
+        sync_service,
+        sub.source_id,
+        sub.group_number,
     )
     await callback.answer()
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 
 NUMERATOR = "numerator"
@@ -16,12 +16,16 @@ def is_rzgmu_source(pdf_path: str) -> bool:
     return pdf_path.startswith("/upload/schedule/")
 
 
+def week_type_for_date(value: date) -> str:
+    year = value.year if value.month >= 9 else value.year - 1
+    semester_start = date(year, 9, 1)
+    week_number = max(0, (value - semester_start).days // 7)
+    return NUMERATOR if week_number % 2 == 0 else DENOMINATOR
+
+
 def current_rzgmu_week_type(now: datetime | None = None) -> str:
     moment = now or datetime.now()
-    year = moment.year if moment.month >= 9 else moment.year - 1
-    semester_start = datetime(year, 9, 1, tzinfo=moment.tzinfo)
-    week_number = max(0, (moment.date() - semester_start.date()).days // 7)
-    return NUMERATOR if week_number % 2 == 0 else DENOMINATOR
+    return week_type_for_date(moment.date())
 
 
 def week_type_label(week_type: str | None) -> str | None:

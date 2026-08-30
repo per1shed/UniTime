@@ -41,6 +41,7 @@ logger = logging.getLogger("sync_rsreu_to_db")
 async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int]:
     ok = 0
     failed = 0
+    lock = asyncio.Lock()
 
     async with sync.session_factory() as session:
         stmt = (
@@ -52,28 +53,36 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int]:
         )
         sources = (await session.execute(stmt)).scalars().all()
 
-    for source in sources:
+    semaphore = asyncio.Semaphore(sync.settings.rsreu_sync_concurrency)
+
+    async def cache_one(source: ScheduleSource) -> None:
+        nonlocal ok, failed
         ref = parse_rsreu_ref(source.pdf_path)
         if not ref:
-            continue
+            return
         _, group_id = ref
-        async with sync.session_factory() as session:
-            try:
-                schedule = await sync.load_rsreu_schedule(session, source.id, group_id)
-                await session.commit()
-                if schedule:
-                    ok += 1
-                else:
-                    failed += 1
-                    logger.warning("Empty schedule for %s", source.variant_name)
-            except Exception:
-                logger.exception(
-                    "Failed to cache %s (source_id=%s)",
-                    source.variant_name,
-                    source.id,
-                )
-                failed += 1
 
+        async with semaphore:
+            async with sync.session_factory() as session:
+                try:
+                    schedule = await sync.load_rsreu_schedule(session, source.id, group_id)
+                    await session.commit()
+                    async with lock:
+                        if schedule:
+                            ok += 1
+                        else:
+                            failed += 1
+                            logger.warning("Empty schedule for %s", source.variant_name)
+                except Exception:
+                    async with lock:
+                        failed += 1
+                    logger.exception(
+                        "Failed to cache %s (source_id=%s)",
+                        source.variant_name,
+                        source.id,
+                    )
+
+    await asyncio.gather(*(cache_one(source) for source in sources))
     return ok, failed
 
 
@@ -94,7 +103,10 @@ async def main() -> None:
     logger.info("Syncing RSREU group list...")
     await sync.sync_rsreu_only()
 
-    logger.info("Caching schedules for all RSREU groups...")
+    logger.info(
+        "Caching schedules for all RSREU groups (concurrency=%s)...",
+        settings.rsreu_sync_concurrency,
+    )
     ok, failed = await cache_all_schedules(sync)
     logger.info("Done: %s groups cached, %s failed", ok, failed)
     if failed:

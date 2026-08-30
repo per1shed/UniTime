@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import re
 from zoneinfo import ZoneInfo
 
@@ -141,11 +141,31 @@ def resolve_schedule_for_view(
     *,
     week_type: str | None = None,
     now: datetime | None = None,
+    week_start: date | None = None,
 ) -> dict:
     if not schedule:
         return {}
+    from parsers.rzgmu_dates import filter_weekly_schedule, monday_of, week_label
+
+    moment = now or datetime.now()
+    selected_week_start = week_start or monday_of(moment.date())
+
     if is_rzgmu_source(pdf_path):
-        return resolve_rzgmu_schedule(schedule, week_type=week_type, now=now)
+        resolved = resolve_rzgmu_schedule(schedule, week_type=week_type, now=now)
+        if schedule_is_calendar_format(resolved):
+            return resolved
+        return filter_weekly_schedule(resolved, selected_week_start)
+
+    if is_rsreu_source(pdf_path):
+        result = dict(schedule)
+        result.setdefault("__week__", {})
+        result["__week__"] = {
+            **result.get("__week__", {}),
+            "calendar_start": selected_week_start.isoformat(),
+            "calendar_label": week_label(selected_week_start),
+        }
+        return result
+
     return schedule
 
 

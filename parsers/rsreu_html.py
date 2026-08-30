@@ -67,6 +67,28 @@ def pick_week_by_type(
     return pick_current_week(filtered, today)
 
 
+def pick_week_by_start(weeks: list["WeekInfo"], week_start: date) -> "WeekInfo | None":
+    if not weeks:
+        return None
+
+    target = week_start.isoformat()
+    exact = next((week for week in weeks if week.date == target), None)
+    if exact:
+        return exact
+
+    for week in weeks:
+        start = date.fromisoformat(week.date)
+        end = start + timedelta(days=6)
+        if start <= week_start <= end:
+            return week
+
+    past = [week for week in weeks if date.fromisoformat(week.date) <= week_start]
+    if past:
+        return max(past, key=lambda week: week.date)
+
+    return min(weeks, key=lambda week: week.date)
+
+
 @dataclass
 class GroupInfo:
     group_id: int
@@ -145,6 +167,7 @@ class RsreuHtmlParser:
         week_date: str | None = None,
         *,
         today: date | None = None,
+        weeks: list[WeekInfo] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> dict:
         if client is None:
@@ -154,10 +177,12 @@ class RsreuHtmlParser:
                     group_id,
                     week_date,
                     today=today,
+                    weeks=weeks,
                     client=owned_client,
                 )
 
-        weeks = await self.fetch_weeks(faculty_id, group_id, client=client)
+        if weeks is None:
+            weeks = await self.fetch_weeks(faculty_id, group_id, client=client)
         if not weeks:
             return {}
 

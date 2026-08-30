@@ -231,89 +231,54 @@ def groups_keyboard(
     return builder.as_markup()
 
 
-def day_selector_keyboard(
+def _week_nav_callback(
+    prefix: str,
     source_id: int,
     group_number: int,
-    specialty_id: int,
+    week_start: str,
     *,
-    show_rsreu_week_switch: bool = False,
-    rsreu_week_type: str | None = None,
-) -> InlineKeyboardMarkup:
-    return schedule_nav_keyboard(
-        source_id,
-        group_number,
-        include_back=True,
-        back_callback=f"back:groups:{source_id}:{specialty_id}",
-        show_rsreu_week_switch=show_rsreu_week_switch,
-        rsreu_week_type=rsreu_week_type,
-    )
-
-
-def _rsreu_week_callback(
-    source_id: int,
-    group_number: int,
-    week_type: str,
-    day_index: int | None = None,
+    include_back: bool = False,
 ) -> str:
-    if day_index is None:
-        return f"rwk:{source_id}:{group_number}:{week_type}"
-    return f"rwk:{source_id}:{group_number}:{week_type}:{day_index}"
+    base = f"{prefix}:{source_id}:{group_number}:{week_start}"
+    if include_back:
+        return f"{base}:back"
+    return base
 
 
 def schedule_nav_keyboard(
     source_id: int,
     group_number: int,
     *,
-    selected_day: int | None = None,
-    selected_week: bool = False,
     include_back: bool = False,
     back_callback: str | None = None,
-    show_rsreu_week_switch: bool = False,
-    rsreu_week_type: str | None = None,
+    show_week_nav: bool = False,
+    week_start: str | None = None,
+    week_label_text: str | None = None,
 ) -> InlineKeyboardMarkup:
-    days = [
-        ("Пн", 0),
-        ("Вт", 1),
-        ("Ср", 2),
-        ("Чт", 3),
-        ("Пт", 4),
-        ("Сб", 5),
-        ("Вс", 6),
-    ]
     builder = InlineKeyboardBuilder()
 
-    def _day_button(label: str, day_index: int) -> InlineKeyboardButton:
-        text = f"· {label} ·" if selected_day == day_index else label
-        return InlineKeyboardButton(
-            text=text,
-            callback_data=f"day:{source_id}:{group_number}:{day_index}",
-        )
-
-    builder.row(*[_day_button(label, day_index) for label, day_index in days[:4]])
-    builder.row(*[_day_button(label, day_index) for label, day_index in days[4:]])
-
-    if show_rsreu_week_switch:
-        num_text = "· Числитель ·" if rsreu_week_type == "numerator" else "Числитель"
-        den_text = "· Знаменатель ·" if rsreu_week_type == "denominator" else "Знаменатель"
+    if show_week_nav and week_start and week_label_text:
         builder.row(
             InlineKeyboardButton(
-                text=num_text,
-                callback_data=_rsreu_week_callback(
-                    source_id, group_number, "numerator", selected_day
+                text=" ",
+                callback_data=_week_nav_callback(
+                    "rwp", source_id, group_number, week_start, include_back=include_back
                 ),
+                icon_custom_emoji_id=e.ARROW_LEFT,
             ),
             InlineKeyboardButton(
-                text=den_text,
-                callback_data=_rsreu_week_callback(
-                    source_id, group_number, "denominator", selected_day
+                text=week_label_text,
+                callback_data=_week_nav_callback("rwc", source_id, group_number, week_start),
+            ),
+            InlineKeyboardButton(
+                text=" ",
+                callback_data=_week_nav_callback(
+                    "rwn", source_id, group_number, week_start, include_back=include_back
                 ),
+                icon_custom_emoji_id=e.ARROW_RIGHT,
             ),
         )
 
-    week_text = "· Вся неделя ·" if selected_week else "Вся неделя"
-    builder.row(
-        _btn(week_text, f"week:{source_id}:{group_number}", e.CALENDAR),
-    )
     if include_back and back_callback:
         builder.row(_back_button(back_callback))
     return builder.as_markup()
