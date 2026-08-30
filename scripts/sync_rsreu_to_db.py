@@ -18,6 +18,8 @@ import logging
 import sys
 from pathlib import Path
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -27,7 +29,7 @@ from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
 from bot.db.models import ScheduleSource, Specialty, University
-from bot.db.repository import ensure_universities, parse_rsreu_ref
+from bot.db.repository import ensure_universities, get_group_schedule, parse_rsreu_ref
 from bot.db.session import create_session_factory, init_db
 from bot.services.sync import ScheduleSyncService
 
@@ -37,10 +39,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sync_rsreu_to_db")
 
+_FETCH_RETRIES = 3
 
-async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int]:
+
+def _schedule_is_cached(schedule: dict | None) -> bool:
+    if not schedule:
+        return False
+    if schedule.get("__week__", {}).get("date"):
+        return True
+    return any(schedule.get(str(day)) for day in range(7))
+
+
+async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int, int]:
     ok = 0
     failed = 0
+    skipped = 0
     lock = asyncio.Lock()
 
     async with sync.session_factory() as session:
@@ -56,7 +69,7 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int]:
     semaphore = asyncio.Semaphore(sync.settings.rsreu_sync_concurrency)
 
     async def cache_one(source: ScheduleSource) -> None:
-        nonlocal ok, failed
+        nonlocal ok, failed, skipped
         ref = parse_rsreu_ref(source.pdf_path)
         if not ref:
             return
@@ -64,26 +77,58 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int]:
 
         async with semaphore:
             async with sync.session_factory() as session:
-                try:
-                    schedule = await sync.load_rsreu_schedule(session, source.id, group_id)
-                    await session.commit()
+                cached = await get_group_schedule(session, source.id, group_id)
+                if _schedule_is_cached(cached):
                     async with lock:
-                        if schedule:
-                            ok += 1
-                        else:
+                        skipped += 1
+                    return
+
+                last_error: Exception | None = None
+                for attempt in range(_FETCH_RETRIES):
+                    try:
+                        schedule = await sync.load_rsreu_schedule(session, source.id, group_id)
+                        await session.commit()
+                        async with lock:
+                            if schedule:
+                                ok += 1
+                            else:
+                                failed += 1
+                                logger.warning("Empty schedule for %s", source.variant_name)
+                        return
+                    except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as exc:
+                        last_error = exc
+                        if attempt < _FETCH_RETRIES - 1:
+                            delay = 5 * (attempt + 1)
+                            logger.warning(
+                                "Retry %s/%s for %s in %ss: %s",
+                                attempt + 2,
+                                _FETCH_RETRIES,
+                                source.variant_name,
+                                delay,
+                                exc,
+                            )
+                            await asyncio.sleep(delay)
+                    except Exception:
+                        async with lock:
                             failed += 1
-                            logger.warning("Empty schedule for %s", source.variant_name)
-                except Exception:
-                    async with lock:
-                        failed += 1
-                    logger.exception(
-                        "Failed to cache %s (source_id=%s)",
-                        source.variant_name,
-                        source.id,
-                    )
+                        logger.exception(
+                            "Failed to cache %s (source_id=%s)",
+                            source.variant_name,
+                            source.id,
+                        )
+                        return
+
+                async with lock:
+                    failed += 1
+                logger.error(
+                    "Failed to cache %s after %s attempts: %s",
+                    source.variant_name,
+                    _FETCH_RETRIES,
+                    last_error,
+                )
 
     await asyncio.gather(*(cache_one(source) for source in sources))
-    return ok, failed
+    return ok, failed, skipped
 
 
 async def main() -> None:
@@ -107,8 +152,13 @@ async def main() -> None:
         "Caching schedules for all RSREU groups (concurrency=%s)...",
         settings.rsreu_sync_concurrency,
     )
-    ok, failed = await cache_all_schedules(sync)
-    logger.info("Done: %s groups cached, %s failed", ok, failed)
+    ok, failed, skipped = await cache_all_schedules(sync)
+    logger.info(
+        "Done: %s fetched, %s skipped (already cached), %s failed",
+        ok,
+        skipped,
+        failed,
+    )
     if failed:
         sys.exit(1)
 

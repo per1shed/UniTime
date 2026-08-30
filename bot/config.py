@@ -52,7 +52,7 @@ def get_settings() -> Settings:
         break_reminder_minutes=int(os.getenv("BREAK_REMINDER_MINUTES", "5")),
         schedule_sync_hours=int(os.getenv("SCHEDULE_SYNC_HOURS", "12")),
         rzgmu_sync_concurrency=int(os.getenv("RZGMU_SYNC_CONCURRENCY", "6")),
-        rsreu_sync_concurrency=int(os.getenv("RSREU_SYNC_CONCURRENCY", "8")),
+        rsreu_sync_concurrency=int(os.getenv("RSREU_SYNC_CONCURRENCY", "4")),
         rsreu_proxy=os.getenv("RSREU_PROXY") or None,
         rsreu_cache_only=os.getenv("RSREU_CACHE_ONLY", "").lower() in {"1", "true", "yes"},
     )
