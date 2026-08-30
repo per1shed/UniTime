@@ -1075,8 +1075,6 @@ async def on_portal_group_selected(
         sync_service,
         source_id,
         group_id,
-        include_back=True,
-        specialty_id=source.specialty_id,
     )
     await callback.answer("Расписание сохранено")
 
