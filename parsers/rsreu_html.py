@@ -248,6 +248,12 @@ class RsreuHtmlParser:
                 break
         return start, end
 
+    def _lesson_type_from_block(self, block: Tag) -> str:
+        badge = block.select_one(".schedule-lesson-type-badge")
+        if not badge:
+            return ""
+        return badge.get_text(" ", strip=True)
+
     def _parse_lesson_cell(
         self, cell: Tag, start: str, end: str
     ) -> list[dict]:
@@ -256,10 +262,11 @@ class RsreuHtmlParser:
 
         lessons: list[dict] = []
         for block in cell.find_all("div", recursive=False):
+            lesson_type = self._lesson_type_from_block(block)
             text = self._cell_block_text(block)
             if not text:
                 continue
-            subject, extra = self._split_subject_extra(text)
+            subject, extra = self._split_subject_extra(text, lesson_type=lesson_type)
             lessons.append(
                 {
                     "start": start,
@@ -278,13 +285,19 @@ class RsreuHtmlParser:
         text = re.sub(r"\n+", "\n", text)
         return text.strip()
 
-    def _split_subject_extra(self, text: str) -> tuple[str, str]:
-        text = LESSON_TYPE_RE.sub("", text).strip()
+    def _split_subject_extra(self, text: str, *, lesson_type: str = "") -> tuple[str, str]:
+        type_prefix = lesson_type.strip()
+        match = LESSON_TYPE_RE.match(text)
+        if match:
+            type_prefix = match.group(1).strip()
+            text = text[match.end():].strip()
         text = text.replace("\xa0", " ")
         lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n") if line.strip()]
         if not lines:
-            return "Занятие", ""
+            return type_prefix or "Занятие", ""
         subject = lines[0].rstrip(",").strip()
+        if type_prefix:
+            subject = f"{type_prefix} {subject}".strip()
         extra_parts = [part.rstrip(",").strip() for part in lines[1:] if part.strip()]
         extra = ", ".join(extra_parts)
         extra = re.sub(r",\s*,", ", ", extra)

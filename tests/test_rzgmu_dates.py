@@ -1,6 +1,7 @@
 from datetime import date
 
 from parsers.rzgmu_dates import (
+    filter_day_lessons,
     filter_weekly_schedule,
     lesson_visible_on_week,
     parse_extra_dates,
@@ -53,6 +54,7 @@ def test_filter_weekly_schedule_sets_label():
         "1": [
             {"subject": "Анатомия", "extra": "15,29/09", "start": "10.00", "end": "11.40"},
             {"subject": "Основы военной подготовки", "extra": "8,22/09", "start": "10.00", "end": "11.40"},
+            {"subject": "Биохимия", "extra": "17,24/11; 1/12", "start": "10.00", "end": "11.40"},
         ],
     }
     week = date(2025, 9, 15)
@@ -60,3 +62,25 @@ def test_filter_weekly_schedule_sets_label():
     assert len(filtered["1"]) == 1
     assert filtered["1"][0]["subject"] == "Анатомия"
     assert filtered["__week__"]["calendar_label"] == week_label(week)
+
+
+def test_dated_slot_hides_other_subjects_and_undated():
+    lessons = [
+        {"subject": "Анатомия", "extra": "15,29/09", "start": "10.00", "end": "11.40"},
+        {"subject": "Основы военной подготовки", "extra": "8,22/09", "start": "10.00", "end": "11.40"},
+        {"subject": "Биохимия", "extra": "17,24/11; 1/12", "start": "10.00", "end": "11.40"},
+        {"subject": "Физика", "extra": "ауд. 101", "start": "10.00", "end": "11.40"},
+    ]
+    week = date(2025, 9, 15)
+    filtered = filter_day_lessons(lessons, 1, week)
+    assert [item["subject"] for item in filtered] == ["Анатомия"]
+
+
+def test_undated_slot_still_shows_regular_lessons():
+    lessons = [
+        {"subject": "Физика", "extra": "ауд. 101", "start": "12.00", "end": "13.30"},
+        {"subject": "Химия", "extra": "ауд. 202", "start": "12.00", "end": "13.30"},
+    ]
+    week = date(2025, 9, 15)
+    filtered = filter_day_lessons(lessons, 1, week)
+    assert len(filtered) == 2

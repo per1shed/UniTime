@@ -5,6 +5,15 @@ on:
     # Every 12 hours (UTC). Matches SCHEDULE_SYNC_HOURS=12 on the bot.
     - cron: "0 */12 * * *"
   workflow_dispatch:
+    inputs:
+      force_refresh:
+        description: Re-fetch all RSREU groups (ignore cache)
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
 
 jobs:
   sync:
@@ -45,4 +54,5 @@ jobs:
         env:
           UNITIME_SKIP_BOT_TOKEN: "1"
           DATABASE_URL: postgresql+asyncpg://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@127.0.0.1:15432/${{ secrets.POSTGRES_DB }}
+          RSREU_FORCE_REFRESH: ${{ github.event.inputs.force_refresh || '0' }}
         run: python scripts/sync_rsreu_to_db.py

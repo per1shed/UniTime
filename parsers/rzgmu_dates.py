@@ -22,8 +22,9 @@ def monday_of(value: date) -> date:
 
 def week_label(week_start: date) -> str:
     week_end = week_start + timedelta(days=6)
-    month = week_end.month if week_start.month != week_end.month else week_start.month
-    return f"{week_start.day}-{week_end.day}/{month:02d}"
+    if week_start.month != week_end.month:
+        return f"{week_start.day:02d}.{week_start.month:02d}-{week_end.day:02d}.{week_end.month:02d}"
+    return f"{week_start.day}-{week_end.day}/{week_start.month:02d}"
 
 
 def shift_week(week_start: date, delta_weeks: int) -> date:
@@ -122,6 +123,46 @@ def lesson_visible_on_week(
     return True
 
 
+def _slot_key(lesson: dict) -> tuple[str, str]:
+    return lesson.get("start", ""), lesson.get("end", "")
+
+
+def filter_day_lessons(
+    lessons: list[dict],
+    day_index: int,
+    week_start: date,
+) -> list[dict]:
+    """Keep only lessons relevant for the selected week.
+
+    If a time slot contains date-specific lectures, show only those that
+    fall on this week — hide other dated subjects and undated placeholders.
+    """
+    slots: dict[tuple[str, str], list[dict]] = {}
+    for lesson in lessons:
+        if not isinstance(lesson, dict):
+            continue
+        slots.setdefault(_slot_key(lesson), []).append(lesson)
+
+    filtered: list[dict] = []
+    for slot_lessons in slots.values():
+        has_dated = any(has_scheduled_dates(lesson.get("extra", "")) for lesson in slot_lessons)
+        if has_dated:
+            for lesson in slot_lessons:
+                extra = lesson.get("extra", "")
+                if not has_scheduled_dates(extra):
+                    continue
+                if lesson_visible_on_week(lesson, day_index, week_start):
+                    filtered.append(lesson)
+            continue
+
+        for lesson in slot_lessons:
+            if lesson_visible_on_week(lesson, day_index, week_start):
+                filtered.append(lesson)
+
+    filtered.sort(key=lambda item: item.get("start", ""))
+    return filtered
+
+
 def filter_weekly_schedule(schedule: dict, week_start: date) -> dict:
     filtered: dict = {}
     for key, value in schedule.items():
@@ -133,12 +174,7 @@ def filter_weekly_schedule(schedule: dict, week_start: date) -> dict:
             continue
         day_index = int(key)
         lessons = value if isinstance(value, list) else []
-        filtered[key] = [
-            lesson
-            for lesson in lessons
-            if isinstance(lesson, dict)
-            and lesson_visible_on_week(lesson, day_index, week_start)
-        ]
+        filtered[key] = filter_day_lessons(lessons, day_index, week_start)
     filtered.setdefault("__week__", {})
     filtered["__week__"] = {
         **filtered.get("__week__", {}),

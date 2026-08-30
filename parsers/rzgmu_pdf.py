@@ -216,7 +216,33 @@ def _split_location(text: str) -> tuple[str, str]:
     return text[:start].strip(" ,;"), text[start:].strip(" ,;")
 
 
-def _split_lecture_segment(segment: str) -> tuple[str, str]:
+def _lesson_type_from_lines(raw_lines: list[str]) -> str:
+    for line in raw_lines[:3]:
+        lowered = line.lower().strip(" ,;")
+        if not lowered or len(lowered) > 48:
+            continue
+        if "лекци" in lowered or lowered.startswith("лек."):
+            return "Лек."
+        if "практ" in lowered or lowered.startswith("пр."):
+            return "Практ."
+        if "лабор" in lowered or lowered.startswith("лаб."):
+            return "Лаб."
+        if "семин" in lowered:
+            return "Сем."
+    return ""
+
+
+def _with_lesson_type(subject: str, type_prefix: str) -> str:
+    if not type_prefix:
+        return subject
+    lowered = subject.lower()
+    for marker in ("лек.", "практ.", "лаб.", "сем."):
+        if lowered.startswith(marker):
+            return subject
+    return f"{type_prefix} {subject}".strip()
+
+
+def _split_lecture_segment(segment: str, *, type_prefix: str = "") -> tuple[str, str]:
     cleaned = strip_semester_hours(segment.replace("\n", " "))
     cleaned = re.sub(r"^Лекции\s+", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = LECTURE_COUNT_RE.sub("", cleaned).strip()
@@ -232,6 +258,7 @@ def _split_lecture_segment(segment: str) -> tuple[str, str]:
         extra_parts = [location]
 
     subject = re.sub(r"\s+", " ", subject).strip() or "Занятие"
+    subject = _with_lesson_type(subject, type_prefix or "Лек.")
     extra = " ".join(part for part in extra_parts if part).strip()
     return subject, extra
 
@@ -243,12 +270,13 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
 
     raw_lines = [line.strip() for line in chunk.split("\n") if line.strip()]
     is_lecture_block = any("лекции" in line.lower() for line in raw_lines)
+    type_prefix = "Лек." if is_lecture_block else _lesson_type_from_lines(raw_lines)
 
     if is_lecture_block:
         segments: list[str] = []
         for line in raw_lines:
             cleaned = re.sub(r"^Лекции\s+", "", line, flags=re.IGNORECASE).strip()
-            if cleaned:
+            if cleaned and "лекции" not in cleaned.lower():
                 segments.append(cleaned)
 
         shared_location = ""
@@ -258,7 +286,7 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
 
         lessons: list[ParsedLesson] = []
         for segment in segments:
-            subject, extra = _split_lecture_segment(segment)
+            subject, extra = _split_lecture_segment(segment, type_prefix=type_prefix)
             if shared_location and shared_location not in extra:
                 extra = f"{extra} {shared_location}".strip() if extra else shared_location
             lessons.append(ParsedLesson(start=start, end=end, subject=subject, extra=extra))
@@ -266,7 +294,7 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
 
     flat = re.sub(r"\s*\|\s*", " ", " ".join(raw_lines))
     flat = re.sub(r"\s+", " ", flat).strip()
-    subject, extra = _split_lecture_segment(flat)
+    subject, extra = _split_lecture_segment(flat, type_prefix=type_prefix)
     return [ParsedLesson(start=start, end=end, subject=subject, extra=extra)]
 
 

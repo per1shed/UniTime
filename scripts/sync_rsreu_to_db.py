@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -67,6 +68,9 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int, int]
         sources = (await session.execute(stmt)).scalars().all()
 
     semaphore = asyncio.Semaphore(sync.settings.rsreu_sync_concurrency)
+    force_refresh = os.getenv("RSREU_FORCE_REFRESH", "").lower() in {"1", "true", "yes"}
+    if force_refresh:
+        logger.info("RSREU_FORCE_REFRESH=1 — re-fetching all groups")
 
     async def cache_one(source: ScheduleSource) -> None:
         nonlocal ok, failed, skipped
@@ -77,11 +81,12 @@ async def cache_all_schedules(sync: ScheduleSyncService) -> tuple[int, int, int]
 
         async with semaphore:
             async with sync.session_factory() as session:
-                cached = await get_group_schedule(session, source.id, group_id)
-                if _schedule_is_cached(cached):
-                    async with lock:
-                        skipped += 1
-                    return
+                if not force_refresh:
+                    cached = await get_group_schedule(session, source.id, group_id)
+                    if _schedule_is_cached(cached):
+                        async with lock:
+                            skipped += 1
+                        return
 
                 last_error: Exception | None = None
                 for attempt in range(_FETCH_RETRIES):
