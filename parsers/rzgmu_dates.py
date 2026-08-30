@@ -22,9 +22,7 @@ def monday_of(value: date) -> date:
 
 def week_label(week_start: date) -> str:
     week_end = week_start + timedelta(days=6)
-    if week_start.month != week_end.month:
-        return f"{week_start.day:02d}.{week_start.month:02d}-{week_end.day:02d}.{week_end.month:02d}"
-    return f"{week_start.day}-{week_end.day}/{week_start.month:02d}"
+    return f"{week_start.day:02d}.{week_start.month:02d}-{week_end.day:02d}.{week_end.month:02d}"
 
 
 def shift_week(week_start: date, delta_weeks: int) -> date:
