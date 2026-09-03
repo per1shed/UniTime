@@ -81,5 +81,5 @@ def week_schedule_heading(week_dates: str | None, *, is_current: bool = False) -
     else:
         title = "Расписание на неделю"
     if is_current:
-        title = f"{title}, неделя идёт сейчас"
+        title = f"{title} — текущая неделя"
     return title
