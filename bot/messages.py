@@ -1,4 +1,8 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from bot import emoji as e
+from bot.config import get_settings
 
 
 def user_nick(first_name: str | None, username: str | None = None) -> str | None:
@@ -12,10 +16,24 @@ def step_prompt(text: str) -> str:
     return f"{e.ce(e.PICK, '⬇️')} {label}"
 
 
+def time_of_day_greeting(now: datetime | None = None) -> str:
+    """06–12 утро, 12–18 день, 18–00 вечер, 00–06 ночь."""
+    moment = now or datetime.now(ZoneInfo(get_settings().timezone))
+    hour = moment.hour
+    if 6 <= hour < 12:
+        return "доброе утро"
+    if 12 <= hour < 18:
+        return "добрый день"
+    if 18 <= hour < 24:
+        return "добрый вечер"
+    return "доброй ночи"
+
+
 def greeting_line(nick: str | None) -> str:
+    greeting = time_of_day_greeting()
     if nick:
-        return f"{e.ce(e.USER, '👤')} {nick}, приветствуем в «Расписание РязГМУ»"
-    return "Добро пожаловать в «Расписание РязГМУ»"
+        return f"{e.ce(e.USER, '👤')} {nick}, {greeting}"
+    return greeting.capitalize()
 
 
 def main_menu_text(nick: str | None) -> str:
