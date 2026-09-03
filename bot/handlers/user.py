@@ -44,7 +44,12 @@ from bot.keyboards.inline import (
 from parsers.rzgmu_dates import monday_of, shift_week
 from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
 from parsers.rzgmu_week import week_type_for_date
-from bot.services.keyboard_tracker import get_keyboard_tracker
+from bot.services.keyboard_tracker import (
+    bind_keyboard,
+    get_keyboard_tracker,
+    hydrate_tracker,
+    get_tracker_session_factory,
+)
 from bot.services.sync import ScheduleSyncService
 from bot.states.flow import FlowStorage
 
@@ -227,27 +232,40 @@ async def _load_schedule_source(session: AsyncSession, source_id: int) -> Schedu
 
 
 async def _edit_or_answer(callback: CallbackQuery, text: str, reply_markup) -> None:
+    if not callback.message:
+        await callback.answer(text, show_alert=True)
+        return
+
     tracker = get_keyboard_tracker()
-    if callback.message:
-        chat_id = callback.message.chat.id
-        message_id = callback.message.message_id
+    chat_id = callback.message.chat.id
+    message_id = callback.message.message_id
+    await hydrate_tracker(tracker, get_tracker_session_factory(), chat_id)
+    if tracker.latest_id(chat_id) is None:
+        tracker.remember_existing(chat_id, message_id)
+
+    if tracker.is_latest(chat_id, message_id):
         await tracker.clear_old(callback.bot, chat_id, except_message_id=message_id)
         try:
             await callback.message.edit_text(text, reply_markup=reply_markup)
         except Exception as exc:
-            # Telegram raises if text+keyboard are unchanged.
             if "message is not modified" not in str(exc).lower():
                 raise
-        tracker.register(chat_id, message_id)
-    else:
-        await callback.answer(text, show_alert=True)
+        await bind_keyboard(chat_id, message_id, text=text, reply_markup=reply_markup)
+        return
+
+    await tracker.clear_old(callback.bot, chat_id)
+    await tracker.strip_message(callback.bot, chat_id, message_id)
+    sent = await callback.bot.send_message(chat_id, text, reply_markup=reply_markup)
+    await bind_keyboard(chat_id, sent.message_id, text=text, reply_markup=reply_markup)
 
 
 async def _send_with_keyboard(message: Message, text: str, reply_markup) -> None:
     tracker = get_keyboard_tracker()
-    await tracker.clear_old(message.bot, message.chat.id)
+    chat_id = message.chat.id
+    await hydrate_tracker(tracker, get_tracker_session_factory(), chat_id)
+    await tracker.clear_old(message.bot, chat_id)
     sent = await message.answer(text, reply_markup=reply_markup)
-    tracker.register(message.chat.id, sent.message_id)
+    await bind_keyboard(chat_id, sent.message_id, text=text, reply_markup=reply_markup)
 
 
 async def _load_universities(session: AsyncSession) -> list[University]:
@@ -616,13 +634,6 @@ async def cmd_change(
     await _send_entry(message, session_factory, flow_storage, reset_flow=True, pick_schedule=True)
 
 
-async def _discard_user_message(message: Message) -> None:
-    try:
-        await message.delete()
-    except Exception:
-        logger.debug("Could not delete user message in chat %s", message.chat.id, exc_info=True)
-
-
 @router.message(
     (F.text & ~F.text.startswith("/"))
     | F.photo
@@ -637,7 +648,7 @@ async def _discard_user_message(message: Message) -> None:
     | F.location
 )
 async def on_user_message(message: Message) -> None:
-    await _discard_user_message(message)
+    return
 
 
 @router.callback_query(F.data == "menu:main")

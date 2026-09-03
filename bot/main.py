@@ -11,6 +11,7 @@ from bot.config import get_settings
 from bot.db.repository import ensure_universities
 from bot.db.session import create_session_factory, init_db
 from bot.handlers.user import router as user_router
+from bot.services.keyboard_tracker import KeyboardGuardMiddleware, setup_keyboard_tracker
 from bot.services.notifications import setup_scheduler
 from bot.services.sync import ScheduleSyncService
 from bot.states.flow import FlowStorage
@@ -50,7 +51,9 @@ async def main() -> None:
 
     flow_storage = FlowStorage()
     sync_service = ScheduleSyncService(session_factory, settings)
+    setup_keyboard_tracker(session_factory)
 
+    dp.message.outer_middleware(KeyboardGuardMiddleware())
     dp.include_router(user_router)
 
     dp["session_factory"] = session_factory

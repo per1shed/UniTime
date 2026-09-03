@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bot.config import Settings
@@ -21,6 +22,9 @@ async def init_db(session_factory: async_sessionmaker[AsyncSession]) -> None:
     engine = session_factory.engine  # type: ignore[attr-defined]
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_keyboard_message_id BIGINT")
+        )
 
 
 async def get_session(

@@ -84,6 +84,7 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(255))
     first_name: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_keyboard_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     subscription: Mapped["UserSubscription | None"] = relationship(
         back_populates="user", uselist=False
