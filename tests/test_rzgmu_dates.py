@@ -84,3 +84,32 @@ def test_undated_slot_still_shows_regular_lessons():
     week = date(2026, 9, 14)
     filtered = filter_day_lessons(lessons, 1, week)
     assert len(filtered) == 2
+
+
+def test_august_week_uses_september_same_year():
+    ref = date(2026, 8, 31)
+    dates, _ = parse_extra_dates("2,23/09", reference=ref)
+    assert dates == [date(2026, 9, 2), date(2026, 9, 23)]
+
+
+def test_date_range_is_not_two_explicit_days():
+    ref = date(2026, 9, 7)
+    dates, date_range = parse_extra_dates(
+        "8/09-10/11 Медико-профилактический корпус",
+        reference=ref,
+    )
+    assert dates == []
+    assert date_range == (date(2026, 9, 8), date(2026, 11, 10))
+    lesson = {"subject": "Основы российской государственности", "extra": "8/09-10/11"}
+    assert lesson_visible_on_week(lesson, 1, date(2026, 9, 7)) is True
+    assert lesson_visible_on_week(lesson, 1, date(2026, 9, 14)) is True
+    assert lesson_visible_on_week(lesson, 1, date(2026, 8, 31)) is False
+
+
+def test_control_date_excluded_from_range():
+    lesson = {
+        "subject": "Лек. Основы российской государственности",
+        "extra": "14/10-23/12, кр. 4/11",
+    }
+    assert lesson_visible_on_week(lesson, 2, date(2026, 11, 2)) is False
+    assert lesson_visible_on_week(lesson, 2, date(2026, 10, 12)) is True

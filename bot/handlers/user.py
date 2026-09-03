@@ -240,23 +240,18 @@ async def _edit_or_answer(callback: CallbackQuery, text: str, reply_markup) -> N
     chat_id = callback.message.chat.id
     message_id = callback.message.message_id
     await hydrate_tracker(tracker, get_tracker_session_factory(), chat_id)
-    if tracker.latest_id(chat_id) is None:
-        tracker.remember_existing(chat_id, message_id)
-
-    if tracker.is_latest(chat_id, message_id):
-        await tracker.clear_old(callback.bot, chat_id, except_message_id=message_id)
-        try:
-            await callback.message.edit_text(text, reply_markup=reply_markup)
-        except Exception as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
-        await bind_keyboard(chat_id, message_id, text=text, reply_markup=reply_markup)
+    await tracker.clear_old(callback.bot, chat_id, except_message_id=message_id)
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except Exception as exc:
+        error = str(exc).lower()
+        if "message is not modified" in error:
+            await bind_keyboard(chat_id, message_id, text=text, reply_markup=reply_markup)
+            return
+        sent = await callback.bot.send_message(chat_id, text, reply_markup=reply_markup)
+        await bind_keyboard(chat_id, sent.message_id, text=text, reply_markup=reply_markup)
         return
-
-    await tracker.clear_old(callback.bot, chat_id)
-    await tracker.strip_message(callback.bot, chat_id, message_id)
-    sent = await callback.bot.send_message(chat_id, text, reply_markup=reply_markup)
-    await bind_keyboard(chat_id, sent.message_id, text=text, reply_markup=reply_markup)
+    await bind_keyboard(chat_id, message_id, text=text, reply_markup=reply_markup)
 
 
 async def _send_with_keyboard(message: Message, text: str, reply_markup) -> None:
@@ -1221,7 +1216,7 @@ async def on_group_selected(
     await callback.answer("Расписание сохранено")
 
 
-@router.callback_query(F.data.regexp(r"^rw[pn]:"))
+@router.callback_query(F.data.startswith("rwp:") | F.data.startswith("rwn:"))
 async def on_week_shift(
     callback: CallbackQuery,
     session_factory: async_sessionmaker[AsyncSession],

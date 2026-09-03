@@ -152,8 +152,11 @@ def resolve_schedule_for_view(
             week_start=selected_week_start,
             now=now,
         )
-        if schedule_is_calendar_format(resolved):
-            # Still stamp the selected calendar week for the week switcher.
+        if schedule_is_calendar_format(resolved) and not any(
+            isinstance(resolved.get(str(day)), list) and resolved.get(str(day))
+            for day in range(7)
+        ):
+            # Calendar-only PDFs still get a week stamp for the switcher.
             from parsers.rzgmu_dates import week_label as _week_label
 
             resolved = dict(resolved)
