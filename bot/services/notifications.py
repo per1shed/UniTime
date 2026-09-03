@@ -32,6 +32,11 @@ from bot.utils.academic_calendar import is_study_day
 logger = logging.getLogger(__name__)
 
 
+def _is_due_this_minute(now: datetime, target: datetime) -> bool:
+    """True when the 1-minute scheduler tick lands on the target clock minute."""
+    return now.hour == target.hour and now.minute == target.minute
+
+
 class NotificationService:
     def __init__(
         self,
@@ -112,7 +117,7 @@ class NotificationService:
             second=0,
             microsecond=0,
         )
-        if abs((now - morning_target).total_seconds()) <= 60:
+        if _is_due_this_minute(now, morning_target):
             key = notification_key("morning", now, str(day_index))
             if not await notification_was_sent(session, sub.user_id, key):
                 text = (
@@ -125,10 +130,12 @@ class NotificationService:
 
         if lessons_today:
             for lesson in lessons_today:
+                if not lesson.start or ":" not in lesson.start:
+                    continue
                 start_h, start_m = map(int, lesson.start.split(":"))
                 lesson_start = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
                 reminder_at = lesson_start - timedelta(minutes=self.settings.lesson_reminder_minutes)
-                if abs((now - reminder_at).total_seconds()) <= 60:
+                if _is_due_this_minute(now, reminder_at):
                     key = notification_key("lesson", now, f"{lesson.start}:{lesson.subject}")
                     if not await notification_was_sent(session, sub.user_id, key):
                         text = (
@@ -148,7 +155,7 @@ class NotificationService:
             second=0,
             microsecond=0,
         )
-        if abs((now - evening_target).total_seconds()) <= 60:
+        if _is_due_this_minute(now, evening_target):
             tomorrow = now + timedelta(days=1)
             key = notification_key("evening", tomorrow, str(tomorrow_index))
             if not await notification_was_sent(session, sub.user_id, key):
