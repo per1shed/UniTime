@@ -11,7 +11,15 @@ from sqlalchemy.orm import selectinload
 
 from bot import emoji as e
 from bot.config import get_settings
-from bot.messages import entry_text, loading_text, main_menu_text, step_text, user_nick
+from bot.messages import (
+    entry_text,
+    loading_text,
+    main_menu_text,
+    step_text,
+    user_nick,
+    week_nav_button_text,
+    with_fixed_schedule_width,
+)
 from bot.db.models import ScheduleSource, Specialty, University, User
 from bot.db.repository import (
     display_group_name,
@@ -202,7 +210,7 @@ async def _render_schedule_view(
             return
 
     tz = get_settings().timezone
-    text = format_week_schedule(schedule, tz)
+    text = with_fixed_schedule_width(format_week_schedule(schedule, tz))
     keyboard = _schedule_nav_for(
         source,
         source_id,

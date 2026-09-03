@@ -64,3 +64,18 @@ def step_text(nick: str | None, prompt: str, context: str | None = None) -> str:
 
 def schedule_choice_text(context: str) -> str:
     return f"{context}\n\n{step_prompt('Выберите день')}"
+
+
+# Telegram sizes the keyboard to the message bubble; braille blanks keep a stable min width.
+_SCHEDULE_WIDTH = 36
+_WEEK_BUTTON_WIDTH = 28
+
+
+def with_fixed_schedule_width(text: str) -> str:
+    return text + "\n" + ("\u2800" * _SCHEDULE_WIDTH)
+
+
+def week_nav_button_text(label: str) -> str:
+    visible = (label or "").strip()
+    extra = max(0, _WEEK_BUTTON_WIDTH - len(visible))
+    return visible + ("\u2800" * extra)
