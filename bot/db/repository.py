@@ -46,6 +46,7 @@ DAY_NAMES = [
 
 async def ensure_universities(session: AsyncSession) -> list[University]:
     await remove_university_by_code(session, "rsu")
+    await remove_university_by_code(session, "rsreu")
 
     configs = (
         {
@@ -53,12 +54,6 @@ async def ensure_universities(session: AsyncSession) -> list[University]:
             "name": "РязГМУ",
             "base_url": "https://www.rzgmu.ru",
             "schedule_page_path": "/students/student/schedule",
-        },
-        {
-            "code": "rsreu",
-            "name": "РГРТУ",
-            "base_url": "https://rsreu.ru",
-            "schedule_page_path": "https://rasp.rsreu.ru/schedule-frame/group",
         },
     )
     universities: list[University] = []

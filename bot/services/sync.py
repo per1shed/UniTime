@@ -62,19 +62,9 @@ class ScheduleSyncService:
             universities = await ensure_universities(session)
             await session.commit()
 
-        rsreu = [university for university in universities if university.code == "rsreu"]
-        others = [university for university in universities if university.code != "rsreu"]
-
-        for university in rsreu:
-            await self._sync_university(university.code, university.id)
-
-        if others:
-            await asyncio.gather(
-                *[
-                    self._sync_university(university.code, university.id)
-                    for university in others
-                ]
-            )
+        for university in universities:
+            if university.code == "rzgmu":
+                await self._sync_university(university.code, university.id)
 
     async def sync_rsreu_only(self) -> None:
         async with self.session_factory() as session:

@@ -23,7 +23,7 @@ def main_menu_text(nick: str | None) -> str:
 
 
 def entry_text(nick: str | None) -> str:
-    return f"{greeting_line(nick)}\n\n{step_prompt('Выберите университет')}"
+    return f"{greeting_line(nick)}\n\n{step_prompt('Выберите курс')}"
 
 
 def loading_text(nick: str | None) -> str:

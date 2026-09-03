@@ -24,6 +24,7 @@ def _btn(text: str, callback_data: str, icon: str | None = None) -> InlineKeyboa
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("Моё расписание", "menu:my", e.CALENDAR))
+    builder.row(_btn("Сменить расписание", "menu:change", e.PICK))
     builder.row(_btn("Уведомления", "menu:notifications", e.BELL))
     return builder.as_markup()
 
@@ -89,10 +90,7 @@ def specialties_keyboard(
 
 
 def faculties_keyboard(university_id: int, university_code: str) -> InlineKeyboardMarkup:
-    if university_code == "rsreu":
-        from parsers.rsreu_faculties import RSREU_FACULTIES as faculties
-    else:
-        from parsers.rzgmu_faculties import RZGMU_FACULTIES as faculties
+    from parsers.rzgmu_faculties import RZGMU_FACULTIES as faculties
 
     builder = InlineKeyboardBuilder()
     for faculty in faculties:

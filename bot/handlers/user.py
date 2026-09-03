@@ -13,6 +13,7 @@ from bot.config import get_settings
 from bot.messages import entry_text, loading_text, main_menu_text, step_text, user_nick
 from bot.db.models import ScheduleSource, Specialty, University, User
 from bot.db.repository import (
+    ensure_universities,
     format_schedule_header,
     format_week_schedule_message,
     get_available_groups,
@@ -37,11 +38,8 @@ from bot.keyboards.inline import (
     rsreu_groups_keyboard,
     specialties_keyboard,
     university_courses_keyboard,
-    universities_keyboard,
     variants_keyboard,
 )
-from parsers.rsreu_faculties import RSREU_FACULTIES
-from parsers.rsreu_html import neighbor_week_start
 from parsers.rzgmu_dates import shift_week
 from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
 from parsers.rzgmu_week import week_type_for_date
@@ -140,6 +138,8 @@ def _schedule_nav_for(
     specialty_id: int | None = None,
     include_back: bool = False,
 ):
+    if is_rzgmu_source(source.pdf_path):
+        include_back = False
     week_start, week_label_text = _calendar_week_from_schedule(schedule)
     return schedule_nav_keyboard(
         source_id,
@@ -299,23 +299,12 @@ async def _load_faculties_for_course(
     university_code: str,
     course_number: int,
 ) -> list:
-    if university_code == "rsreu":
-        faculties = RSREU_FACULTIES
-    else:
-        faculties = RZGMU_FACULTIES
-
     available = []
-    for faculty in faculties:
-        if university_code == "rsreu":
-            stmt = select(Specialty.id).where(
-                Specialty.university_id == university_id,
-                Specialty.code == faculty.key,
-            )
-        else:
-            stmt = select(Specialty.id).where(
-                Specialty.university_id == university_id,
-                Specialty.code.in_(faculty.specialty_codes),
-            )
+    for faculty in RZGMU_FACULTIES:
+        stmt = select(Specialty.id).where(
+            Specialty.university_id == university_id,
+            Specialty.code.in_(faculty.specialty_codes),
+        )
         specialty_ids = list((await session.execute(stmt)).scalars().all())
         if not specialty_ids:
             continue
@@ -536,19 +525,26 @@ async def _build_entry(
     has_subscription: bool,
     nick: str | None,
     *,
-    pick_university: bool = False,
+    pick_schedule: bool = False,
 ) -> tuple[str, object]:
-    if has_subscription and not pick_university:
+    if has_subscription and not pick_schedule:
         return main_menu_text(nick), main_menu_keyboard()
 
-    universities = await _load_universities(session)
-
-    if not universities:
+    universities = await ensure_universities(session)
+    await session.flush()
+    university = next((item for item in universities if item.code == "rzgmu"), None)
+    if not university:
         if has_subscription:
             return loading_text(nick), main_menu_keyboard()
-        return loading_text(nick), universities_keyboard([])
+        return loading_text(nick), main_menu_keyboard()
 
-    return entry_text(nick), universities_keyboard(universities)
+    course_numbers = await _load_university_courses(session, university.id, "rzgmu")
+    if not course_numbers:
+        if has_subscription:
+            return loading_text(nick), main_menu_keyboard()
+        return loading_text(nick), main_menu_keyboard()
+
+    return entry_text(nick), university_courses_keyboard(university.id, course_numbers)
 
 
 async def _send_entry(
@@ -558,7 +554,7 @@ async def _send_entry(
     *,
     reset_flow: bool = False,
     ensure_user: bool = False,
-    pick_university: bool = False,
+    pick_schedule: bool = False,
 ) -> None:
     if reset_flow and flow_storage is not None:
         flow_storage.reset(message.from_user.id)
@@ -576,10 +572,9 @@ async def _send_entry(
             session,
             sub is not None,
             _nick(message.from_user),
-            pick_university=pick_university,
+            pick_schedule=pick_schedule,
         )
-        if ensure_user:
-            await session.commit()
+        await session.commit()
 
     await _send_with_keyboard(message, text, keyboard)
 
@@ -595,7 +590,7 @@ async def cmd_change(
     session_factory: async_sessionmaker[AsyncSession],
     flow_storage: FlowStorage,
 ) -> None:
-    await _send_entry(message, session_factory, flow_storage, reset_flow=True, pick_university=True)
+    await _send_entry(message, session_factory, flow_storage, reset_flow=True, pick_schedule=True)
 
 
 async def _discard_user_message(message: Message) -> None:
@@ -632,6 +627,27 @@ async def on_main_menu(
     async with session_factory() as session:
         sub = await get_user_subscription(session, callback.from_user.id)
         text, keyboard = await _build_entry(session, sub is not None, _nick(callback.from_user))
+        await session.commit()
+    await _edit_or_answer(callback, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:change")
+async def on_change_schedule(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    flow_storage: FlowStorage,
+) -> None:
+    flow_storage.reset(callback.from_user.id)
+    async with session_factory() as session:
+        sub = await get_user_subscription(session, callback.from_user.id)
+        text, keyboard = await _build_entry(
+            session,
+            sub is not None,
+            _nick(callback.from_user),
+            pick_schedule=True,
+        )
+        await session.commit()
     await _edit_or_answer(callback, text, keyboard)
     await callback.answer()
 
@@ -680,30 +696,6 @@ async def on_faculty_selected(
     state.faculty_key = faculty_key
     state.course_number = course_number
 
-    async with session_factory() as session:
-        university = await get_university_by_id(session, university_id)
-
-    if university and university.code == "rsreu":
-        async with session_factory() as session:
-            stmt = select(Specialty).where(
-                Specialty.university_id == university_id,
-                Specialty.code == faculty_key,
-            )
-            specialty = (await session.execute(stmt)).scalar_one_or_none()
-        if not specialty:
-            await callback.answer("Факультет не найден.", show_alert=True)
-            return
-        state.specialty_id = specialty.id
-        await _show_portal_groups_for_course(
-            callback,
-            session_factory,
-            university_id,
-            specialty.id,
-            course_number,
-        )
-        await callback.answer()
-        return
-
     await _show_rzgmu_groups_for_faculty_course(
         callback,
         session_factory,
@@ -751,8 +743,9 @@ async def on_back_to_universities(callback: CallbackQuery, session_factory: asyn
             session,
             sub is not None,
             _nick(callback.from_user),
-            pick_university=True,
+            pick_schedule=True,
         )
+        await session.commit()
     await _edit_or_answer(callback, text, keyboard)
     await callback.answer()
 
@@ -1189,7 +1182,6 @@ async def on_group_selected(
         sync_service,
         source_id,
         group_number,
-        include_back=True,
         specialty_id=source.specialty_id,
     )
     await callback.answer("Расписание сохранено")
@@ -1213,16 +1205,6 @@ async def on_week_shift(
             return
 
         new_week = shift_week(week_start, delta)
-        if is_rsreu_source(source.pdf_path):
-            from bot.db.repository import get_group_schedule
-
-            cached = await get_group_schedule(session, source_id, group_number)
-            neighbor = neighbor_week_start(cached, week_start, delta)
-            if neighbor is None:
-                edge = "предыдущей" if delta < 0 else "следующей"
-                await callback.answer(f"Нет {edge} недели в кэше.", show_alert=True)
-                return
-            new_week = neighbor
 
     await _render_schedule_view(
         callback,
@@ -1296,7 +1278,7 @@ async def on_notifications_menu(callback: CallbackQuery, session_factory: async_
         f"{e.ce(e.BELL, '🔊')} <b>Уведомления</b>\n\n"
         "• В 6:00 — расписание на сегодня\n"
         "• В 21:00 — расписание на завтра\n"
-        "• За 30 минут до каждой пары"
+        "• За 20 минут до каждой пары"
     )
     await _edit_or_answer(callback, text, notifications_keyboard(enabled))
     await callback.answer()

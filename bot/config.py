@@ -48,7 +48,7 @@ def get_settings() -> Settings:
         morning_minute=int(os.getenv("MORNING_MINUTE", "0")),
         evening_hour=int(os.getenv("EVENING_HOUR", "21")),
         evening_minute=int(os.getenv("EVENING_MINUTE", "0")),
-        lesson_reminder_minutes=int(os.getenv("LESSON_REMINDER_MINUTES", "30")),
+        lesson_reminder_minutes=int(os.getenv("LESSON_REMINDER_MINUTES", "20")),
         break_reminder_minutes=int(os.getenv("BREAK_REMINDER_MINUTES", "5")),
         schedule_sync_hours=int(os.getenv("SCHEDULE_SYNC_HOURS", "12")),
         rzgmu_sync_concurrency=int(os.getenv("RZGMU_SYNC_CONCURRENCY", "6")),
