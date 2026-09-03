@@ -68,21 +68,18 @@ def schedule_choice_text(context: str) -> str:
 
 # Telegram sizes the keyboard to the message bubble; braille blanks keep a stable min width.
 _SCHEDULE_WIDTH = 36
-_WEEK_BUTTON_WIDTH = 28
 
 
 def with_fixed_schedule_width(text: str) -> str:
     return text + "\n" + ("\u2800" * _SCHEDULE_WIDTH)
 
 
-def week_nav_button_text(label: str) -> str:
-    visible = (label or "").strip()
-    extra = max(0, _WEEK_BUTTON_WIDTH - len(visible))
-    return visible + ("\u2800" * extra)
-
-
-def week_schedule_heading(week_dates: str | None) -> str:
+def week_schedule_heading(week_dates: str | None, *, is_current: bool = False) -> str:
     dates = (week_dates or "").replace(" (сейчас)", "").strip()
     if dates:
-        return f"Расписание на неделю ({dates})"
-    return "Расписание на неделю"
+        title = f"Расписание на неделю ({dates})"
+    else:
+        title = "Расписание на неделю"
+    if is_current:
+        title = f"{title}, неделя идёт сейчас"
+    return title

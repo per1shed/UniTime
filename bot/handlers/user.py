@@ -99,14 +99,6 @@ def _is_current_week(week_start: date | str | None) -> bool:
     return monday_of(week_start) == monday_of(today)
 
 
-def _with_current_week_mark(label: str | None, week_start: date | str | None) -> str | None:
-    if not label:
-        return label
-    if _is_current_week(week_start) and "(сейчас)" not in label:
-        return f"{label} (сейчас)"
-    return label
-
-
 def _calendar_week_from_schedule(schedule: dict | None) -> tuple[str | None, str | None]:
     if not schedule:
         return None, None
@@ -168,8 +160,7 @@ def _schedule_nav_for(
 ):
     if is_rzgmu_source(source.pdf_path):
         include_back = False
-    week_start, week_label_text = _calendar_week_from_schedule(schedule)
-    week_label_text = _with_current_week_mark(week_label_text, week_start)
+    week_start, _ = _calendar_week_from_schedule(schedule)
     return schedule_nav_keyboard(
         source_id,
         group_number,
@@ -177,7 +168,6 @@ def _schedule_nav_for(
         back_callback=f"back:groups:{source_id}:{specialty_id}" if specialty_id else None,
         show_week_nav=_show_week_nav(source, schedule),
         week_start=week_start,
-        week_label_text=week_label_text,
     )
 
 
@@ -210,9 +200,13 @@ async def _render_schedule_view(
             return
 
     tz = get_settings().timezone
-    _, week_dates = _calendar_week_from_schedule(schedule)
+    week_start_iso, week_dates = _calendar_week_from_schedule(schedule)
     body = format_week_schedule(schedule, tz)
-    text = with_fixed_schedule_width(f"{week_schedule_heading(week_dates)}\n\n{body}")
+    heading = week_schedule_heading(
+        week_dates,
+        is_current=_is_current_week(week_start_iso),
+    )
+    text = with_fixed_schedule_width(f"{heading}\n\n{body}")
     keyboard = _schedule_nav_for(
         source,
         source_id,
@@ -1247,30 +1241,6 @@ async def on_week_shift(
         specialty_id=source.specialty_id,
     )
     await callback.answer()
-
-
-@router.callback_query(F.data.startswith("rwc:"))
-async def on_week_label(
-    callback: CallbackQuery,
-    session_factory: async_sessionmaker[AsyncSession],
-    sync_service: ScheduleSyncService,
-) -> None:
-    _, source_id, group_number, week_start, _ = _parse_week_nav_callback(callback.data)
-    async with session_factory() as session:
-        source = await _load_schedule_source(session, source_id)
-        if not source:
-            await callback.answer("Расписание не найдено.", show_alert=True)
-            return
-        schedule = await _load_view_schedule(
-            session,
-            sync_service,
-            source,
-            source_id,
-            group_number,
-            week_start=week_start,
-        )
-    label = _calendar_week_from_schedule(schedule)[1] or week_start.strftime("%d.%m.%Y")
-    await callback.answer(f"Неделя {label}", show_alert=False)
 
 
 @router.callback_query(F.data == "menu:my")

@@ -3,7 +3,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.db.models import ScheduleSource, Specialty, University
 from bot import emoji as e
-from bot.messages import week_nav_button_text
 
 
 def _back_button(callback_data: str) -> InlineKeyboardButton:
@@ -253,11 +252,10 @@ def schedule_nav_keyboard(
     back_callback: str | None = None,
     show_week_nav: bool = False,
     week_start: str | None = None,
-    week_label_text: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
-    if show_week_nav and week_start and week_label_text:
+    if show_week_nav and week_start:
         builder.row(
             InlineKeyboardButton(
                 text=" ",
@@ -265,10 +263,6 @@ def schedule_nav_keyboard(
                     "rwp", source_id, group_number, week_start, include_back=include_back
                 ),
                 icon_custom_emoji_id=e.ARROW_LEFT,
-            ),
-            InlineKeyboardButton(
-                text=week_nav_button_text(week_label_text),
-                callback_data=_week_nav_callback("rwc", source_id, group_number, week_start),
             ),
             InlineKeyboardButton(
                 text=" ",
