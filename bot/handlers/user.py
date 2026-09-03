@@ -1,5 +1,6 @@
 import logging
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -40,7 +41,7 @@ from bot.keyboards.inline import (
     university_courses_keyboard,
     variants_keyboard,
 )
-from parsers.rzgmu_dates import shift_week
+from parsers.rzgmu_dates import monday_of, shift_week
 from parsers.rzgmu_faculties import RZGMU_FACULTIES, faculty_for_code
 from parsers.rzgmu_week import week_type_for_date
 from bot.services.keyboard_tracker import get_keyboard_tracker
@@ -70,6 +71,7 @@ def _schedule_header(
             week_label = f"{calendar} · {type_label}"
         else:
             week_label = calendar or type_label
+        week_label = _with_current_week_mark(week_label, week_meta.get("calendar_start"))
     return format_schedule_header(source, group_number, week_type_label=week_label)
 
 
@@ -77,6 +79,26 @@ def _parse_week_nav_callback(data: str) -> tuple[str, int, int, date, bool]:
     parts = data.split(":")
     include_back = len(parts) > 4 and parts[4] == "back"
     return parts[0], int(parts[1]), int(parts[2]), date.fromisoformat(parts[3]), include_back
+
+
+def _is_current_week(week_start: date | str | None) -> bool:
+    if not week_start:
+        return False
+    if isinstance(week_start, str):
+        try:
+            week_start = date.fromisoformat(week_start)
+        except ValueError:
+            return False
+    today = datetime.now(ZoneInfo(get_settings().timezone)).date()
+    return monday_of(week_start) == monday_of(today)
+
+
+def _with_current_week_mark(label: str | None, week_start: date | str | None) -> str | None:
+    if not label:
+        return label
+    if _is_current_week(week_start) and "(сейчас)" not in label:
+        return f"{label} (сейчас)"
+    return label
 
 
 def _calendar_week_from_schedule(schedule: dict | None) -> tuple[str | None, str | None]:
@@ -141,6 +163,7 @@ def _schedule_nav_for(
     if is_rzgmu_source(source.pdf_path):
         include_back = False
     week_start, week_label_text = _calendar_week_from_schedule(schedule)
+    week_label_text = _with_current_week_mark(week_label_text, week_start)
     return schedule_nav_keyboard(
         source_id,
         group_number,
