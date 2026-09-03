@@ -555,11 +555,10 @@ async def _build_entry(
     *,
     pick_schedule: bool = False,
 ) -> tuple[str, object]:
-    if subscription is not None and not pick_schedule:
-        source = subscription.source
-        selection = (
-            _selected_group_line(source, subscription.group_number) if source else None
-        )
+    if not pick_schedule:
+        selection = None
+        if subscription is not None and getattr(subscription, "source", None):
+            selection = _selected_group_line(subscription.source, subscription.group_number)
         return main_menu_text(nick, selection=selection), main_menu_keyboard()
 
     universities = await ensure_universities(session)

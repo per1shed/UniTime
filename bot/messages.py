@@ -38,8 +38,7 @@ def greeting_line(nick: str | None) -> str:
 
 def main_menu_text(nick: str | None, selection: str | None = None) -> str:
     lines = [greeting_line(nick)]
-    if selection:
-        lines.extend(["", selection])
+    lines.extend(["", selection or "Вы ещё не выбрали группу"])
     lines.extend(["", step_prompt("Выберите действие")])
     return "\n".join(lines)
 
