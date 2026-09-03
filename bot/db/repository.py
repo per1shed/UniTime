@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 import re
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -680,6 +680,22 @@ def format_week_schedule(
     timezone: str | None = None,
     now: datetime | None = None,
 ) -> str:
+    # Prefer the already-resolved Mon–Sun view (used by the week switcher).
+    # Only dump the raw calendar listing when day slots were not filled.
+    has_resolved_days = any(
+        isinstance(schedule.get(str(day)), list) and schedule.get(str(day))
+        for day in range(7)
+    )
+    if has_resolved_days:
+        parts = []
+        for day_index in range(7):
+            day_key = str(day_index)
+            lessons = lessons_from_day_data(schedule.get(day_key, []))
+            if lessons:
+                parts.append(format_day_schedule(day_index, lessons, timezone, now))
+        if parts:
+            return "\n\n".join(parts)
+
     if schedule.get("__calendar__") or schedule.get("__meta__", {}).get("format") == "calendar":
         return format_calendar_schedule(schedule)
 
@@ -687,13 +703,7 @@ def format_week_schedule(
     if cyclic and not any(str(day) in schedule for day in range(7)):
         return format_calendar_schedule(schedule)
 
-    parts = []
-    for day_index in range(7):
-        day_key = str(day_index)
-        lessons = lessons_from_day_data(schedule.get(day_key, []))
-        if lessons:
-            parts.append(format_day_schedule(day_index, lessons, timezone, now))
-    return "\n\n".join(parts) if parts else "Расписание пусто"
+    return "Расписание пусто"
 
 
 def compute_breaks(lessons: list[Lesson]) -> list[tuple[str, str, int]]:
@@ -713,3 +723,71 @@ def compute_breaks(lessons: list[Lesson]) -> list[tuple[str, str, int]]:
 
 def notification_key(kind: str, date: datetime, extra: str) -> str:
     return f"{kind}:{date.date().isoformat()}:{extra}"
+
+
+def current_month_start(tz_name: str) -> datetime:
+    now = datetime.now(ZoneInfo(tz_name))
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def touch_user_activity(
+    session: AsyncSession,
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+) -> None:
+    user = await get_or_create_user(session, telegram_id, username, first_name)
+    user.last_callback_at = datetime.now(timezone.utc)
+
+
+async def count_users(session: AsyncSession) -> int:
+    result = await session.execute(select(func.count()).select_from(User))
+    return int(result.scalar_one())
+
+
+async def count_new_users_since(session: AsyncSession, since: datetime) -> int:
+    result = await session.execute(
+        select(func.count()).select_from(User).where(User.created_at >= since)
+    )
+    return int(result.scalar_one())
+
+
+async def count_active_users_since(session: AsyncSession, since: datetime) -> int:
+    result = await session.execute(
+        select(func.count()).select_from(User).where(User.last_callback_at >= since)
+    )
+    return int(result.scalar_one())
+
+
+def _user_search_filter(query: str):
+    raw = query.strip().lstrip("@")
+    if not raw:
+        return None
+    like = f"%{raw}%"
+    filters = [
+        User.username.ilike(like),
+        User.first_name.ilike(like),
+    ]
+    if raw.isdigit():
+        filters.append(User.telegram_id == int(raw))
+    return or_(*filters)
+
+
+async def list_users_page(
+    session: AsyncSession,
+    *,
+    offset: int,
+    limit: int,
+    query: str | None = None,
+) -> tuple[list[User], int]:
+    stmt = select(User)
+    count_stmt = select(func.count()).select_from(User)
+    search = _user_search_filter(query) if query else None
+    if search is not None:
+        stmt = stmt.where(search)
+        count_stmt = count_stmt.where(search)
+    total = int((await session.execute(count_stmt)).scalar_one())
+    result = await session.execute(
+        stmt.order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(limit)
+    )
+    return list(result.scalars().all()), total

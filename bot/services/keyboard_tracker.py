@@ -177,8 +177,14 @@ async def bind_keyboard(
     await persist_keyboard_message(get_tracker_session_factory(), chat_id, message_id)
 
 
-async def handle_incoming_user_message(message: Message) -> None:
+async def handle_incoming_user_message(message: Message, flow_storage: Any = None) -> None:
     if message.from_user and message.from_user.is_bot:
+        return
+    if (
+        flow_storage is not None
+        and message.from_user
+        and getattr(flow_storage, "is_admin_search", lambda _id: False)(message.from_user.id)
+    ):
         return
 
     factory = get_tracker_session_factory()
@@ -235,5 +241,5 @@ class KeyboardGuardMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         if isinstance(event, Message):
-            await handle_incoming_user_message(event)
+            await handle_incoming_user_message(event, data.get("flow_storage"))
         return await handler(event, data)

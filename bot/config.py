@@ -22,6 +22,7 @@ class Settings:
     rsreu_sync_concurrency: int
     rsreu_proxy: str | None = None
     rsreu_cache_only: bool = False
+    admin_id: int | None = None
 
 
 def get_settings() -> Settings:
@@ -40,6 +41,9 @@ def get_settings() -> Settings:
     if not bot_token:
         bot_token = "unused"
 
+    admin_raw = (os.getenv("ADMIN_ID") or "").strip()
+    admin_id = int(admin_raw) if admin_raw.isdigit() else None
+
     return Settings(
         bot_token=bot_token,
         database_url=database_url,
@@ -55,4 +59,10 @@ def get_settings() -> Settings:
         rsreu_sync_concurrency=int(os.getenv("RSREU_SYNC_CONCURRENCY", "4")),
         rsreu_proxy=os.getenv("RSREU_PROXY") or None,
         rsreu_cache_only=os.getenv("RSREU_CACHE_ONLY", "").lower() in {"1", "true", "yes"},
+        admin_id=admin_id,
     )
+
+
+def is_admin(telegram_id: int | None) -> bool:
+    admin_id = get_settings().admin_id
+    return admin_id is not None and telegram_id is not None and telegram_id == admin_id

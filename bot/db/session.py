@@ -25,6 +25,9 @@ async def init_db(session_factory: async_sessionmaker[AsyncSession]) -> None:
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_keyboard_message_id BIGINT")
         )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_callback_at TIMESTAMPTZ")
+        )
 
 
 async def get_session(

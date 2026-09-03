@@ -301,3 +301,34 @@ def notifications_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     )
     builder.row(_back_button("menu:main"))
     return builder.as_markup()
+
+
+def admin_panel_keyboard(
+    *,
+    page: int,
+    pages: int,
+    searching: bool = False,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("Поиск", "admin:search", e.PICK))
+    if searching:
+        builder.row(_btn("Сбросить поиск", "admin:home", e.CROSS))
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(_btn("Назад", f"admin:list:{page - 1}", e.ARROW_LEFT))
+    if pages > 1:
+        nav.append(
+            InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="admin:noop")
+        )
+    if page + 1 < pages:
+        nav.append(_btn("Вперёд", f"admin:list:{page + 1}", e.ARROW_RIGHT))
+    if nav:
+        builder.row(*nav)
+    builder.row(_btn("Главное меню", "menu:main", e.USER))
+    return builder.as_markup()
+
+
+def admin_search_prompt_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("Отмена", "admin:home", e.CROSS))
+    return builder.as_markup()
