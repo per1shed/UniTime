@@ -17,7 +17,7 @@ from bot.messages import (
     main_menu_text,
     step_text,
     user_nick,
-    week_nav_button_text,
+    week_schedule_heading,
     with_fixed_schedule_width,
 )
 from bot.db.models import ScheduleSource, Specialty, University, User
@@ -210,7 +210,9 @@ async def _render_schedule_view(
             return
 
     tz = get_settings().timezone
-    text = with_fixed_schedule_width(format_week_schedule(schedule, tz))
+    _, week_dates = _calendar_week_from_schedule(schedule)
+    body = format_week_schedule(schedule, tz)
+    text = with_fixed_schedule_width(f"{week_schedule_heading(week_dates)}\n\n{body}")
     keyboard = _schedule_nav_for(
         source,
         source_id,

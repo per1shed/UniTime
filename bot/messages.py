@@ -79,3 +79,10 @@ def week_nav_button_text(label: str) -> str:
     visible = (label or "").strip()
     extra = max(0, _WEEK_BUTTON_WIDTH - len(visible))
     return visible + ("\u2800" * extra)
+
+
+def week_schedule_heading(week_dates: str | None) -> str:
+    dates = (week_dates or "").replace(" (сейчас)", "").strip()
+    if dates:
+        return f"Расписание на неделю ({dates})"
+    return "Расписание на неделю"
