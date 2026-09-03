@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from bot import emoji as e
 from bot.db.models import (
@@ -397,6 +398,9 @@ async def get_user_subscription(session: AsyncSession, telegram_id: int) -> User
     stmt = (
         select(UserSubscription)
         .join(User)
+        .options(
+            selectinload(UserSubscription.source).selectinload(ScheduleSource.specialty)
+        )
         .where(User.telegram_id == telegram_id)
     )
     result = await session.execute(stmt)

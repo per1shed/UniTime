@@ -14,9 +14,9 @@ from bot.config import get_settings
 from bot.messages import entry_text, loading_text, main_menu_text, step_text, user_nick
 from bot.db.models import ScheduleSource, Specialty, University, User
 from bot.db.repository import (
+    display_group_name,
     ensure_universities,
-    format_schedule_header,
-    format_week_schedule_message,
+    format_week_schedule,
     get_available_groups,
     get_or_create_user,
     get_university_by_id,
@@ -62,22 +62,15 @@ def _nick(user) -> str | None:
     return user_nick(user.first_name, user.username)
 
 
-def _schedule_header(
-    source: ScheduleSource,
-    group_number: int,
-    schedule: dict | None = None,
-) -> str:
-    week_label = None
-    if schedule:
-        week_meta = schedule.get("__week__", {})
-        calendar = week_meta.get("calendar_label")
-        type_label = week_meta.get("type_label")
-        if calendar and type_label:
-            week_label = f"{calendar} · {type_label}"
-        else:
-            week_label = calendar or type_label
-        week_label = _with_current_week_mark(week_label, week_meta.get("calendar_start"))
-    return format_schedule_header(source, group_number, week_type_label=week_label)
+def _selected_group_line(source: ScheduleSource, group_number: int) -> str:
+    faculty = faculty_for_code(source.specialty.code)
+    faculty_name = faculty.name if faculty else source.specialty.name
+    parts: list[str] = []
+    if source.course_number:
+        parts.append(f"{source.course_number} курс")
+    parts.append(faculty_name)
+    parts.append(f"группа {display_group_name(source, group_number)}")
+    return " · ".join(str(part) for part in parts)
 
 
 def _parse_week_nav_callback(data: str) -> tuple[str, int, int, date, bool]:
@@ -209,8 +202,7 @@ async def _render_schedule_view(
             return
 
     tz = get_settings().timezone
-    header = _schedule_header(source, group_number, schedule)
-    text = format_week_schedule_message(header, schedule, tz)
+    text = format_week_schedule(schedule, tz)
     keyboard = _schedule_nav_for(
         source,
         source_id,
@@ -558,26 +550,26 @@ async def _show_specialties(
 
 async def _build_entry(
     session: AsyncSession,
-    has_subscription: bool,
+    subscription,
     nick: str | None,
     *,
     pick_schedule: bool = False,
 ) -> tuple[str, object]:
-    if has_subscription and not pick_schedule:
-        return main_menu_text(nick), main_menu_keyboard()
+    if subscription is not None and not pick_schedule:
+        source = subscription.source
+        selection = (
+            _selected_group_line(source, subscription.group_number) if source else None
+        )
+        return main_menu_text(nick, selection=selection), main_menu_keyboard()
 
     universities = await ensure_universities(session)
     await session.flush()
     university = next((item for item in universities if item.code == "rzgmu"), None)
     if not university:
-        if has_subscription:
-            return loading_text(nick), main_menu_keyboard()
         return loading_text(nick), main_menu_keyboard()
 
     course_numbers = await _load_university_courses(session, university.id, "rzgmu")
     if not course_numbers:
-        if has_subscription:
-            return loading_text(nick), main_menu_keyboard()
         return loading_text(nick), main_menu_keyboard()
 
     return entry_text(nick), university_courses_keyboard(university.id, course_numbers)
@@ -606,7 +598,7 @@ async def _send_entry(
         sub = await get_user_subscription(session, message.from_user.id)
         text, keyboard = await _build_entry(
             session,
-            sub is not None,
+            sub,
             _nick(message.from_user),
             pick_schedule=pick_schedule,
         )
@@ -655,7 +647,7 @@ async def on_main_menu(
     flow_storage.reset(callback.from_user.id)
     async with session_factory() as session:
         sub = await get_user_subscription(session, callback.from_user.id)
-        text, keyboard = await _build_entry(session, sub is not None, _nick(callback.from_user))
+        text, keyboard = await _build_entry(session, sub, _nick(callback.from_user))
         await session.commit()
     await _edit_or_answer(callback, text, keyboard)
     await callback.answer()
@@ -672,7 +664,7 @@ async def on_change_schedule(
         sub = await get_user_subscription(session, callback.from_user.id)
         text, keyboard = await _build_entry(
             session,
-            sub is not None,
+            sub,
             _nick(callback.from_user),
             pick_schedule=True,
         )
@@ -770,7 +762,7 @@ async def on_back_to_universities(callback: CallbackQuery, session_factory: asyn
         sub = await get_user_subscription(session, callback.from_user.id)
         text, keyboard = await _build_entry(
             session,
-            sub is not None,
+            sub,
             _nick(callback.from_user),
             pick_schedule=True,
         )
