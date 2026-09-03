@@ -14,8 +14,8 @@ def step_prompt(text: str) -> str:
 
 def greeting_line(nick: str | None) -> str:
     if nick:
-        return f"{e.ce(e.USER, '👤')} {nick}, приветствуем в UniTime"
-    return "Добро пожаловать в UniTime"
+        return f"{e.ce(e.USER, '👤')} {nick}, приветствуем в «Расписание РязГМУ»"
+    return "Добро пожаловать в «Расписание РязГМУ»"
 
 
 def main_menu_text(nick: str | None) -> str:
