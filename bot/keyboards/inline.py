@@ -259,7 +259,7 @@ def schedule_nav_keyboard(
     if show_week_nav and week_start and week_label_text:
         builder.row(
             InlineKeyboardButton(
-                text="‹",
+                text=" ",
                 callback_data=_week_nav_callback(
                     "rwp", source_id, group_number, week_start, include_back=include_back
                 ),
@@ -270,7 +270,7 @@ def schedule_nav_keyboard(
                 callback_data=_week_nav_callback("rwc", source_id, group_number, week_start),
             ),
             InlineKeyboardButton(
-                text="›",
+                text=" ",
                 callback_data=_week_nav_callback(
                     "rwn", source_id, group_number, week_start, include_back=include_back
                 ),
