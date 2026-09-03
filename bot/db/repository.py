@@ -590,17 +590,6 @@ def format_lesson_highlight(lesson: Lesson, *, ongoing: bool = False) -> str:
     return "\n".join(lines)
 
 
-def format_break_line(break_end: str, next_start: str) -> str:
-    return f"Перерыв: <i>{break_end}-{next_start}</i>"
-
-
-def break_line_after(lesson: Lesson, lessons: list[Lesson]) -> str | None:
-    for end_time, next_start, _ in compute_breaks(lessons):
-        if end_time == lesson.end:
-            return format_break_line(end_time, next_start)
-    return None
-
-
 def format_lessons_list(lessons: list[Lesson]) -> str:
     if not lessons:
         return "Занятий нет"
@@ -707,21 +696,6 @@ def format_week_schedule(
         return format_calendar_schedule(schedule)
 
     return "Расписание пусто"
-
-
-def compute_breaks(lessons: list[Lesson]) -> list[tuple[str, str, int]]:
-    """Return breaks as (start_after_lesson, next_lesson_start, minutes)."""
-    breaks = []
-    sorted_lessons = sorted(lessons, key=lambda x: x.end)
-    for current, nxt in zip(sorted_lessons, sorted_lessons[1:]):
-        end_h, end_m = parse_time(current.end)
-        start_h, start_m = parse_time(nxt.start)
-        end_dt = datetime(2000, 1, 1, end_h, end_m)
-        start_dt = datetime(2000, 1, 1, start_h, start_m)
-        gap = int((start_dt - end_dt).total_seconds() // 60)
-        if gap >= 10:
-            breaks.append((current.end, nxt.start, gap))
-    return breaks
 
 
 def notification_key(kind: str, date: datetime, extra: str) -> str:

@@ -12,7 +12,6 @@ from bot.config import Settings
 from bot import emoji as e
 from bot.db.models import ScheduleSource, User, UserSubscription
 from bot.db.repository import (
-    break_line_after,
     format_lesson_highlight,
     format_lessons_list,
     get_group_schedule,
@@ -148,9 +147,6 @@ class NotificationService:
                             f"Через {self.settings.lesson_reminder_minutes} минут начнётся пара:\n"
                             f"{format_lesson_highlight(lesson)}"
                         )
-                        break_line = break_line_after(lesson, lessons_today)
-                        if break_line:
-                            text += f"\n{break_line}"
                         await self._send(sub.user.telegram_id, text)
                         await mark_notification_sent(session, sub.user_id, key)
 
