@@ -27,7 +27,7 @@ async def setup_bot_commands(bot: Bot) -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Запустить бота"),
-            BotCommand(command="change", description="Сменить университет и группу"),
+            BotCommand(command="change", description="Сменить группу"),
         ]
     )
 

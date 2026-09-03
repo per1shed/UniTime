@@ -24,7 +24,7 @@ def _btn(text: str, callback_data: str, icon: str | None = None) -> InlineKeyboa
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(_btn("Моё расписание", "menu:my", e.CALENDAR))
-    builder.row(_btn("Сменить расписание", "menu:change", e.PICK))
+    builder.row(_btn("Сменить группу", "menu:change", e.PICK))
     builder.row(_btn("Уведомления", "menu:notifications", e.BELL))
     return builder.as_markup()
 
