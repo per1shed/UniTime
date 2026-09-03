@@ -284,6 +284,12 @@ def schedule_nav_keyboard(
     return builder.as_markup()
 
 
+def notification_week_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn("Расписание на неделю", "menu:my", e.CALENDAR))
+    return builder.as_markup()
+
+
 def notifications_keyboard(enabled: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(

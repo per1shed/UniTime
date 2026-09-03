@@ -25,6 +25,7 @@ from bot.db.repository import (
     schedule_is_calendar_format,
 )
 from parsers.rzgmu_week import calendar_key_for_date
+from bot.keyboards.inline import notification_week_keyboard
 from bot.services.keyboard_tracker import get_keyboard_tracker
 from bot.services.sync import ScheduleSyncService
 from bot.utils.academic_calendar import is_study_day
@@ -169,8 +170,14 @@ class NotificationService:
 
     async def _send(self, telegram_id: int, text: str) -> None:
         try:
-            await get_keyboard_tracker().clear_old(self.bot, telegram_id)
-            await self.bot.send_message(telegram_id, text)
+            tracker = get_keyboard_tracker()
+            await tracker.clear_old(self.bot, telegram_id)
+            sent = await self.bot.send_message(
+                telegram_id,
+                text,
+                reply_markup=notification_week_keyboard(),
+            )
+            tracker.register(telegram_id, sent.message_id)
         except Exception:
             logger.exception("Failed to send notification to %s", telegram_id)
 
