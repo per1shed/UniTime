@@ -108,7 +108,7 @@ def test_date_range_is_not_two_explicit_days():
 
 def test_control_date_excluded_from_range():
     lesson = {
-        "subject": "Лек. Основы российской государственности",
+        "subject": "лек Основы российской государственности",
         "extra": "14/10-23/12, кр. 4/11",
     }
     assert lesson_visible_on_week(lesson, 2, date(2026, 11, 2)) is False

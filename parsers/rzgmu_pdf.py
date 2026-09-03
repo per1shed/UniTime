@@ -57,6 +57,7 @@ GROUPS_RANGE_RE = re.compile(
 )
 DN_RE = re.compile(r"^д\s*/?\s*н$", re.IGNORECASE)
 GROUP_TOKEN_RE = re.compile(r"^(\d+)([a-zа-яё]+)$", re.IGNORECASE)
+LECTURE_PREFIX = "лек"
 PRACTICE_HOURS_RE = re.compile(r"\(\d+\s*дн", re.IGNORECASE)
 
 
@@ -221,7 +222,7 @@ def _lesson_type_from_line(line: str) -> str:
     if not lowered:
         return ""
     if re.fullmatch(r"лекции|лек\.", lowered) or re.match(r"^(лекции|лек\.)\b", lowered):
-        return "Лек."
+        return LECTURE_PREFIX
     if re.fullmatch(
         r"практические(?:\s+занятия)?|практика|практ\.|пр\.", lowered
     ) or re.match(r"^(практические(?:\s+занятия)?|практика|практ\.|пр\.)\b", lowered):
@@ -235,7 +236,7 @@ def _lesson_type_from_line(line: str) -> str:
     ):
         return "Сем."
     if re.search(r"\bлекции\s*$", lowered) and len(lowered) <= 32:
-        return "Лек."
+        return LECTURE_PREFIX
     if re.search(r"\bпрактические\s*$", lowered) and len(lowered) <= 32:
         return "Практ."
     return ""
@@ -270,7 +271,7 @@ def _with_lesson_type(subject: str, type_prefix: str) -> str:
     if not type_prefix:
         return subject
     lowered = subject.lower()
-    for marker in ("лек.", "практ.", "лаб.", "сем."):
+    for marker in ("лек.", "лек ", "практ.", "лаб.", "сем."):
         if lowered.startswith(marker):
             return subject
     return f"{type_prefix} {subject}".strip()
@@ -280,7 +281,7 @@ def _split_lecture_segment(segment: str, *, type_prefix: str = "") -> tuple[str,
     cleaned = strip_semester_hours(segment.replace("\n", " "))
     leading_type = _lesson_type_from_line(cleaned.split(" ", 1)[0]) if cleaned else ""
     if re.match(r"^Лекции\b", cleaned, flags=re.IGNORECASE):
-        type_prefix = type_prefix or "Лек."
+        type_prefix = type_prefix or LECTURE_PREFIX
         cleaned = re.sub(r"^Лекции\s+", "", cleaned, flags=re.IGNORECASE).strip()
     elif leading_type and re.match(
         r"^(лек\.|практ\.|пр\.|лаб\.|сем\.|практика|практические|лабораторн\w*|семинар\w*)\b",
@@ -319,12 +320,12 @@ def _parse_time_chunk(start: str, end: str, chunk: str) -> list[ParsedLesson]:
 
     raw_lines = [line.strip() for line in chunk.split("\n") if line.strip()]
     type_prefix = _lesson_type_from_lines(raw_lines)
-    is_lecture_block = type_prefix == "Лек." or any(
+    is_lecture_block = type_prefix == LECTURE_PREFIX or any(
         re.match(r"^лекции\b", line.lower()) for line in raw_lines
     )
 
     if is_lecture_block:
-        type_prefix = type_prefix or "Лек."
+        type_prefix = type_prefix or LECTURE_PREFIX
         segments: list[str] = []
         for line in raw_lines:
             if _is_type_label_only(line):
@@ -764,7 +765,7 @@ def _parse_lecture_row_simple(
         end = normalize_time(time_match.group(2))
         subject = subject_cell.split("\n")[0].strip() or "Лекция"
         subject = strip_semester_hours(subject)
-        subject = _with_lesson_type(subject, "Лек.")
+        subject = _with_lesson_type(subject, LECTURE_PREFIX)
         extra = strip_semester_hours(extra_cell.replace("\n", " ").strip())
         lesson = ParsedLesson(start=start, end=end, subject=subject, extra=extra)
         _assign_lessons_to_groups(
@@ -785,7 +786,7 @@ def _parse_lecture_row_simple(
             else:
                 start, end = "", ""
                 subject = line
-            subject = _with_lesson_type(strip_semester_hours(subject), "Лек.")
+            subject = _with_lesson_type(strip_semester_hours(subject), LECTURE_PREFIX)
             lesson = ParsedLesson(
                 start=start,
                 end=end,
@@ -829,7 +830,7 @@ def _parse_lecture_row_streams(
                     ParsedLesson(
                         start=normalize_time(match.group(1)),
                         end=normalize_time(match.group(2)),
-                        subject=_with_lesson_type(subject_name, "Лек."),
+                        subject=_with_lesson_type(subject_name, LECTURE_PREFIX),
                         extra=" ".join(subject.split("\n")[1:]).strip(),
                     )
                 ]
@@ -840,7 +841,7 @@ def _parse_lecture_row_streams(
                 ParsedLesson(
                     start=lesson.start,
                     end=lesson.end,
-                    subject=_with_lesson_type(lesson.subject, "Лек."),
+                    subject=_with_lesson_type(lesson.subject, LECTURE_PREFIX),
                     extra=lesson.extra,
                 )
                 for lesson in lessons
@@ -882,7 +883,7 @@ def _parse_lecture_days_table(
             start, end = "", ""
 
         subject = subject_cell.split("\n")[0].strip() or "Лекция"
-        subject = _with_lesson_type(strip_semester_hours(subject), "Лек.")
+        subject = _with_lesson_type(strip_semester_hours(subject), LECTURE_PREFIX)
         payload = {
             "start": start,
             "end": end,

@@ -549,11 +549,17 @@ def _lesson_is_ongoing(
 
 def lessons_from_day_data(day_data: list[dict]) -> list[Lesson]:
     lessons: list[Lesson] = []
-    type_prefixes = ("Лек.", "Лаб.", "Упр.", "Практ.", "Сем.", "Конс.", "Зач.", "Экз.")
+    type_prefixes = ("лек", "Лек.", "Лаб.", "Упр.", "Практ.", "Сем.", "Конс.", "Зач.", "Экз.")
+    lecture_prefix_re = re.compile(r"^(лек\.|лекции|лек)\s+", re.IGNORECASE)
     for item in day_data:
         subject = str(item.get("subject", "") or "")
+        lecture_match = lecture_prefix_re.match(subject.strip())
+        if lecture_match:
+            subject = f"лек {subject.strip()[lecture_match.end():]}".strip()
         lesson_type = str(item.get("type", "") or "").strip()
         if lesson_type and not any(subject.startswith(prefix) for prefix in type_prefixes):
+            if lesson_type.lower().startswith("лек"):
+                lesson_type = "лек"
             subject = f"{lesson_type} {subject}".strip()
         lessons.append(
             Lesson(
